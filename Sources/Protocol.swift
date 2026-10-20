@@ -17,8 +17,8 @@ let kReadTimeoutMs = 2000
 // MARK: - Framing
 
 enum Frame {
-    static let STX: UInt8 = 0x01
-    static let ETX: UInt8 = 0xFE
+    static let STX: UInt8 = 0x01       // request STX (responses use 0x02)
+    static let ETX: UInt8 = 0xFE       // request ETX (responses use 0xFD)
     static let maxPayload = 0x30   // 48, per the firmware cap
 
     /// Build a 64-byte report from a payload (payload already begins FF 00 CLASS …).
@@ -39,10 +39,11 @@ enum Frame {
         return buf
     }
 
-    /// Extract the payload (bytes between the 01 … FE framing) from a received report.
-    /// Returns the bytes starting after `01 LEN 00 00`, up to (not including) CHK.
-    static func parse(_ report: [UInt8]) -> (payload: [UInt8], checksumOK: Bool)? {
-        guard report.count >= 6, report[0] == STX else { return nil }
+    /// Parse a framed report (request `01 LEN 00 00 … CHK FE` or response `02 LEN ST 00 … CHK FD`).
+    /// Returns the data bytes between the 4-byte header and CHK, the STX, the status byte [2],
+    /// and whether the checksum verifies.
+    static func parse(_ report: [UInt8]) -> (payload: [UInt8], checksumOK: Bool, stx: UInt8, status: UInt8)? {
+        guard report.count >= 6, report[0] == 0x01 || report[0] == 0x02 else { return nil }
         let len = Int(report[1])
         guard len >= 6, len <= report.count else { return nil }
         let n = len - 6
@@ -52,7 +53,7 @@ enum Frame {
         var sum: UInt32 = 0
         for i in 0...(3 + n) { sum &+= UInt32(report[i]) }
         let ok = UInt8((~sum) & 0xFF) == chk
-        return (payload, ok)
+        return (payload, ok, report[0], report[2])
     }
 }
 
@@ -247,40 +248,33 @@ func buildRegistry() -> [Command] {
 // MARK: - Response parsing (best-effort; raw hex always shown too)
 
 struct ParsedResponse {
-    var status: String = ""
-    var uid: String = ""
-    var atqa: String = ""
-    var sak: String = ""
-    var ats: String = ""
-    var version: String = ""
+    var status: String = ""     // human summary
+    var length: String = ""     // payload length
+    var payloadHex: String = "" // data bytes (hex)
+    var ascii: String = ""      // data bytes as ASCII
+    var uid: String = ""        // when the payload looks like a card UID
     var note: String = ""
+}
+
+func asciiOf(_ bytes: [UInt8]) -> String {
+    bytes.map { (0x20...0x7e).contains($0) ? String(UnicodeScalar($0)) : "·" }.joined()
 }
 
 func parseResponse(_ report: [UInt8]) -> ParsedResponse {
     var r = ParsedResponse()
-    guard let (payload, ok) = Frame.parse(report) else {
-        r.status = "No valid frame (no 01…FE)"; return r
+    guard let (payload, ok, stx, status) = Frame.parse(report) else {
+        r.status = "No valid frame (expected 02…FD)"; return r
     }
-    r.note = ok ? "checksum OK" : "checksum MISMATCH"
-    // payload echoes FF 00 CLASS then result. Be defensive about length.
-    guard payload.count >= 4 else { r.status = "short payload"; return r }
-    // class echo
-    let klass = payload.count >= 3 ? payload[2] : 0
-    // For 0x66 transceive replies, the data region starts after the echoed header.
-    // Heuristic: a UID-length type byte is often present; show the plausible slices.
-    let data = Array(payload.dropFirst(3))   // after FF 00 CLASS
-    if data.count >= 1 {
-        let t = data[0]
-        var uidLen = 0
-        switch t { case 0x04: uidLen = 4; case 0x09: uidLen = 7; case 0x0B: uidLen = 10; default: uidLen = 0 }
-        if uidLen > 0 && data.count >= 1 + uidLen {
-            r.uid = hex(Array(data[1..<(1+uidLen)]))
-            if data.count >= 1 + uidLen + 3 {
-                r.atqa = hex(Array(data[(1+uidLen)..<(1+uidLen+2)]))
-                r.sak  = String(format:"%02X", data[1+uidLen+2])
-            }
-        }
+    r.note = ok ? "CRC ok" : "CRC?"
+    r.length = "\(payload.count)"
+    r.payloadHex = payload.isEmpty ? "—" : hex(payload)
+    r.ascii = payload.isEmpty ? "—" : asciiOf(payload)
+    let kind = stx == 0x02 ? "response" : "request"
+    r.status = String(format: "%@  status=0x%02X  len=%d  (%@)", kind, Int(status), payload.count, r.note)
+    // Heuristic UID: a short all-binary payload (no printable run) of 4/7/10 bytes.
+    let printable = payload.filter { (0x20...0x7e).contains($0) }.count
+    if (payload.count == 4 || payload.count == 7 || payload.count == 10) && printable < payload.count {
+        r.uid = hex(payload)
     }
-    r.status = String(format: "class=0x%02X, %d payload bytes", klass, payload.count)
     return r
 }

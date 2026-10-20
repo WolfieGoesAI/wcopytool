@@ -29,9 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // shared top/bottom
     let statusField = NSTextField(labelWithString: "Not connected")
     let prependToggle = NSButton(checkboxWithTitle: "Prepend report-ID byte", target: nil, action: nil)
-    let fUID = NSTextField(labelWithString: "—"); let fATQA = NSTextField(labelWithString: "—")
-    let fSAK = NSTextField(labelWithString: "—"); let fATS = NSTextField(labelWithString: "—")
-    let fVersion = NSTextField(labelWithString: "—"); let fStatus = NSTextField(labelWithString: "—")
+    let fStatus = NSTextField(labelWithString: "—"); let fLen = NSTextField(labelWithString: "—")
+    let fUID = NSTextField(labelWithString: "—")
+    let fPayload = NSTextField(labelWithString: "—"); let fAscii = NSTextField(labelWithString: "—")
     let respRaw = NSTextView()
     var logView: NSTextView!
 
@@ -112,9 +112,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             l.widthAnchor.constraint(equalToConstant: 58).isActive = true
             return hstack([l, fv(f)], spacing: 6)
         }
-        let fieldsRow1 = hstack([pair("UID", fUID), pair("ATQA", fATQA), pair("SAK", fSAK)])
-        let fieldsRow2 = hstack([pair("ATS", fATS), pair("Ver", fVersion), pair("Status", fStatus)])
-        let fieldsBox = vstack([head("Parsed response"), fieldsRow1, fieldsRow2], spacing: 6)
+        let fieldsRow1 = hstack([pair("Status", fStatus), pair("Len", fLen), pair("UID", fUID)])
+        let fieldsRow2 = hstack([pair("Data", fPayload)])
+        let fieldsRow3 = hstack([pair("ASCII", fAscii)])
+        let fieldsBox = vstack([head("Parsed response"), fieldsRow1, fieldsRow2, fieldsRow3], spacing: 6)
         fieldsBox.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(fieldsBox)
 
@@ -246,14 +247,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func pageID() -> NSView {
-        let row1 = hstack([labeled("Freq/A:", field(idFreq, 100)),
-                           ActionButton("Read ID (exp 0x12)") { [weak self] in self?.idRead() },
-                           ActionButton("Reader ctrl 0x68") { [weak self] in self?.sendPayload([0xFF,0x00,0x68], "ctrl 0x68") },
-                           ActionButton("Reader ctrl 0x69") { [weak self] in self?.sendPayload([0xFF,0x00,0x69], "ctrl 0x69") }])
-        let note = NSTextField(wrappingLabelWithString: "125 kHz (EM/T5577) opcodes aren't separated out statically — use these experimental sends plus the Raw page to discover the LF path, then tell me and I'll label them.")
+        // Confirmed from live captures:
+        let dev = hstack([
+            ActionButton("Device info (0x68)") { [weak self] in self?.sendPayload([0xFF,0x00,0x68], "device info") },
+            ActionButton("Serial number (0x69)") { [weak self] in self?.sendPayload([0xFF,0x00,0x69], "serial") },
+        ])
+        // Read probes — find which returns the LF card id (watch Data/ASCII below):
+        let probes = hstack([labeled("A/freq:", field(idFreq, 90)),
+                             ActionButton("Read 0x12") { [weak self] in self?.idTx(0x12) },
+                             ActionButton("Read 0x13") { [weak self] in self?.idTx(0x13) },
+                             ActionButton("Read 0x1F") { [weak self] in self?.idTx(0x1F) }])
+        let ctrl = hstack([ActionButton("Toggle 0x6A 01") { [weak self] in self?.sendPayload([0xFF,0x00,0x6A,0x01], "toggle") },
+                           ActionButton("Slot 0x6B 30") { [weak self] in self?.sendPayload([0xFF,0x00,0x6B,0x30], "slot 30") },
+                           ActionButton("Slot 0x6B 31") { [weak self] in self?.sendPayload([0xFF,0x00,0x6B,0x31], "slot 31") }])
+        let note = NSTextField(wrappingLabelWithString: "0x68 returns the reader model/firmware, 0x69 its serial. The read probes use the 0x66 transceive engine — put an EM/125 kHz card on the reader and watch the Data/ASCII fields to see which one returns the card id; tell me the opcode + bytes and I'll wire a proper Read/Write ID.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID (experimental)"), row1, note])
+        return vstack([head("125 kHz ID"), dev, probes, ctrl, note])
     }
+    func idTx(_ op: UInt8) { tx(op, a: parseU32(idFreq.stringValue)) }
 
     func pageConfig() -> NSView {
         // MFRC522 register defaults from the hidden Config panel
@@ -357,12 +368,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         log("RX \(hex(bytes))")
         respRaw.string = hexDump(bytes)
         let p = parseResponse(bytes)
-        fStatus.stringValue = p.status + (p.note.isEmpty ? "" : "  (\(p.note))")
+        fStatus.stringValue = p.status
+        fLen.stringValue = p.length.isEmpty ? "—" : p.length
         fUID.stringValue = p.uid.isEmpty ? "—" : p.uid
-        fATQA.stringValue = p.atqa.isEmpty ? "—" : p.atqa
-        fSAK.stringValue = p.sak.isEmpty ? "—" : p.sak
-        fATS.stringValue = p.ats.isEmpty ? "—" : p.ats
-        fVersion.stringValue = p.version.isEmpty ? "—" : p.version
+        fPayload.stringValue = p.payloadHex.isEmpty ? "—" : p.payloadHex
+        fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
     }
 
     func log(_ s: String) {

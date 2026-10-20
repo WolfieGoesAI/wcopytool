@@ -123,6 +123,25 @@ against hardware; the app sends them and shows the reply so you can finish the m
 
 ---
 
+## 4a. Response framing  (CONFIRMED on hardware, NSR102-IDIC / V705N3)
+
+Replies do **not** reuse the request framing. They are:
+
+```
+02 LEN STATUS 00  <data …>  CHK  FD
+```
+- STX = **0x02** (requests use 0x01), ETX = **0xFD** (requests use 0xFE).
+- `LEN` = total framed length (data length + 6), same convention as requests.
+- `STATUS` byte (offset 2) = 0x01 on the observed OK replies.
+- `CHK` = one's-complement sum, same formula.
+- The data region is raw (no `FF 00 CLASS` echo).
+
+Confirmed replies:
+- `FF 00 68` → `02 1E 01 00 "wCopy NSR102-IDIC V705N3" CHK FD` → **device model + firmware**.
+- `FF 00 69` → `02 12 01 00 "T39190089986" CHK FD` → **serial number**.
+- `FF 00 66 00 1E … 12 …` (detect) → `02 07 01 00 00 F5 FD` → 1-byte status `00` (no card / not the
+  active-poll opcode for this reader's LF side).
+
 ## 5. Response fields  (formats confirmed from the binary)
 
 Replies are the same 64-byte frame. The payload after the `FF 00 CLASS` echo carries a
