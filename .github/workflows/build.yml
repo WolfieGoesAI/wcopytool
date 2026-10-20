@@ -17,28 +17,30 @@ jobs:
 
       - name: Build universal (arm64 + x86_64)
         run: |
+          mkdir -p dist
           ./build.sh
-          cd build && zip -r wCopyTool-universal.zip wCopyTool.app
-          shasum -a 256 wCopyTool-universal.zip
+          ( cd build && zip -r ../dist/wCopyTool-universal.zip wCopyTool.app )
+          shasum -a 256 dist/wCopyTool-universal.zip
 
       - name: Build Mojave x86_64 (10.14, guaranteed Intel/Mojave)
         run: |
+          mkdir -p dist
           MOJAVE_ONLY=1 ./build.sh
-          cd build && zip -r wCopyTool-mojave-x86_64.zip wCopyTool.app
-          shasum -a 256 wCopyTool-mojave-x86_64.zip
+          ( cd build && zip -r ../dist/wCopyTool-mojave-x86_64.zip wCopyTool.app )
+          shasum -a 256 dist/wCopyTool-mojave-x86_64.zip
 
       - name: Upload universal artifact
         uses: actions/upload-artifact@v4
         with:
           name: wCopyTool-universal
-          path: build/wCopyTool-universal.zip
+          path: dist/wCopyTool-universal.zip
           if-no-files-found: error
 
       - name: Upload Mojave artifact
         uses: actions/upload-artifact@v4
         with:
           name: wCopyTool-mojave-x86_64
-          path: build/wCopyTool-mojave-x86_64.zip
+          path: dist/wCopyTool-mojave-x86_64.zip
           if-no-files-found: error
 
       - name: Attach to Release (on tag push)
@@ -46,5 +48,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/wCopyTool-universal.zip
-            build/wCopyTool-mojave-x86_64.zip
+            dist/wCopyTool-universal.zip
+            dist/wCopyTool-mojave-x86_64.zip
