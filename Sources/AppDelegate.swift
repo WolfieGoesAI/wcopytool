@@ -51,6 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let lfBlk = NSTextField(string: "1")
     let lfWord = NSTextField(string: "00000000")
     var chipEM4305 = false   // false = T5577 (op 0x13), true = EM4305 (op 0x12)
+    let lfPwd = NSTextField(string: "00000000")
+    let pwdReverse = NSButton(checkboxWithTitle: "reverse pwd bytes", target: nil, action: nil)
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
     let rawFrame = NSTextField(string: "01 0F 00 00 FF 00 9A 5A A5 54 69 61 6E")
     var regFields: [UInt8: NSTextField] = [:]
@@ -286,6 +288,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let writeRow = hstack([labeled("Card #:", field(lfWriteId, 130)),
                                labeled("Config:", field(lfConfig, 90)),
                                ActionButton("Write EM4100") { [weak self] in self?.writeEM() }])
+        let pwdRow = hstack([labeled("Password:", field(lfPwd, 100)), pwdReverse,
+                             ActionButton("Unlock T5577") { [weak self] in self?.unlock(false) },
+                             ActionButton("Unlock EM4305") { [weak self] in self?.unlock(true) }])
         let blkRow = hstack([labeled("Addr:", field(lfBlk, 40)),
                              labeled("Word (hex):", field(lfWord, 100)),
                              ActionButton("Write word") { [weak self] in self?.writeBlockManual() }])
@@ -293,7 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
         let note = NSTextField(wrappingLabelWithString: "Read ID uses FF 00 65 05 1E <freq> 00 00 00 00 → 5-byte EM4100 id. 0x68 = model/firmware, 0x69 = serial. 0x65 experimenter is for probing other LF modes.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), dev, readRow, freqs, chipRow, writeRow, blkRow, exp, warn, note])
+        return vstack([head("125 kHz ID"), dev, readRow, freqs, chipRow, writeRow, pwdRow, blkRow, exp, warn, note])
     }
     func setFreq(_ f: UInt32) { idFreq.stringValue = String(f) }
 
@@ -310,15 +315,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     // EM4100 data write to the selected chip (T5577 op 0x13 / EM4305 op 0x12): data to addr 1,2,
     // config to addr 0, then read back to verify. No password/lock.
+    func currentPwd() -> [UInt8] {
+        let b = keyBytes(lfPwd.stringValue)
+        return pwdReverse.state == .on ? rev4(b) : b
+    }
     func writeEM() {
         let id = parseU40(lfWriteId.stringValue)
         let (w1, w2) = em4100Words(id)
         let freq = parseU32(idFreq.stringValue)
+        let pwd = currentPwd()
         if chipEM4305 {
-            // Native EM4305: login, then word5/6 = data, word4 = config. Verify.
-            log(String(format: "EM4305 write id=%010llX  w1=%08X w2=%08X", id, w1, w2))
+            // Native EM4305: login (with password), word5/6 = data, word4 = config, verify.
+            log(String(format: "EM4305 write id=%010llX  w1=%08X w2=%08X pwd=%@", id, w1, w2, hex(pwd)))
             sendSeq([
-                (em4305Login(pwd: 0, freq: freq), "EM4305 login(0)"),
+                (em4305LoginBytes(pwd: pwd, freq: freq), "EM4305 login"),
                 (em4305WriteWord(addr: 5, bytes: u32be(w1), freq: freq), "EM4305 word5 (data1)"),
                 (em4305WriteWord(addr: 6, bytes: u32be(w2), freq: freq), "EM4305 word6 (data2)"),
                 (em4305WriteWord(addr: 4, bytes: kEM4305ConfigWire, freq: freq), "EM4305 word4 (config)"),
@@ -326,14 +336,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ])
         } else {
             let cfg = UInt32(lfConfig.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0x00148040
-            log(String(format: "T5577 write id=%010llX  w1=%08X w2=%08X cfg=%08X", id, w1, w2, cfg))
+            log(String(format: "T5577 write id=%010llX  w1=%08X w2=%08X cfg=%08X pwd=%@", id, w1, w2, cfg, hex(pwd)))
             sendSeq([
-                (lfWriteBlock(block: 1, word: w1, freq: freq), "T5577 block 1"),
-                (lfWriteBlock(block: 2, word: w2, freq: freq), "T5577 block 2"),
-                (lfWriteBlock(block: 0, word: cfg, freq: freq), "T5577 block 0 (config)"),
+                (lfT5Write(addr: 1, word: u32be(w1), pwd: pwd, freq: freq), "T5577 block 1"),
+                (lfT5Write(addr: 2, word: u32be(w2), pwd: pwd, freq: freq), "T5577 block 2"),
+                (lfT5Write(addr: 0, word: u32be(cfg), pwd: pwd, freq: freq), "T5577 block 0 (config)"),
                 (lfRead(freq: freq), "verify read"),
             ])
         }
+    }
+
+    // Unlock sweeps: try every dictionary key (in all byte/bit forms) and read back; the key that
+    // leaves a valid EM read is the card's password.
+    func unlock(_ em4305: Bool) {
+        let freq = parseU32(idFreq.stringValue)
+        var seq: [([UInt8], String)] = []
+        for key in kLFKeyDict {
+            for (tag, kb) in keyForms(key) {
+                let label = "try \(key)\(tag)"
+                if em4305 {
+                    seq.append((em4305LoginBytes(pwd: kb, freq: freq), "EM4305 login \(label)"))
+                    seq.append((lfRead(freq: freq), "  read after \(label)"))
+                } else {
+                    seq.append((lfReadPwd(pwd: kb, freq: freq), "T5577 pwd-read \(label)"))
+                }
+            }
+        }
+        log("unlock \(em4305 ? "EM4305" : "T5577"): trying \(seq.count) steps — watch for a valid EM read")
+        sendSeq(seq, gap: 0.12)
     }
     func writeBlockManual() {
         let addr = parseByte(lfBlk.stringValue)

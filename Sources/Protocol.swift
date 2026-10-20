@@ -193,6 +193,61 @@ func em4100Words(_ id40: UInt64) -> (UInt32, UInt32) {
     return (pack(0..<32), pack(32..<64))
 }
 
+// Proxmark3 T55xx default-password dictionary (wire-order hex) + this reader's own keys.
+// Used by the Unlock buttons to try opening password-protected cards.
+let kLFKeyDict: [String] = [
+    "00000000","51243648","000D8787","19920427","002BCFCF","50524F58","F9DCEBA0","65857569",
+    "05D73B9F","89A69E60","314159E0","7B3D5C48","AA55BBBB","A5B4C3D2","1C0B5848","00434343",
+    "50415353","444E4752","4E457854","44B44CAE","88661858","E9920427","575F4F4B","50520901",
+    "20206666","5469616E","7686962A","C0F5009A","07CEE75D","FEEDBEEF","DEADC0DE","A9EF2AFC",
+    "11111111","22222222","33333333","44444444","55555555","66666666","77777777","88888888",
+    "99999999","AAAAAAAA","BBBBBBBB","CCCCCCCC","DDDDDDDD","EEEEEEEE","FFFFFFFF","A0A1A2A3",
+    "B0B1B2B3","01234567","12345678","0CB7E7FC","FABADA11","AABBCCDD","0C0D0E0F","01020304",
+]
+
+/// 4-byte big-endian pad of a hex password/word string (wire order, MSB first).
+func pad4(_ bytes: [UInt8]) -> [UInt8] {
+    var b = Array(bytes.prefix(4))
+    while b.count < 4 { b.append(0) }
+    return b
+}
+func keyBytes(_ hex: String) -> [UInt8] { pad4(parseHexBlob(hex)) }
+func rev4(_ b: [UInt8]) -> [UInt8] { Array(pad4(b).reversed()) }
+/// Bit-mirror all 32 bits (T5577 ↔ EM4305 clock the password in opposite bit order).
+func bitrev4(_ b: [UInt8]) -> [UInt8] {
+    let p = pad4(b)
+    var v: UInt32 = (UInt32(p[0])<<24)|(UInt32(p[1])<<16)|(UInt32(p[2])<<8)|UInt32(p[3])
+    var r: UInt32 = 0
+    for _ in 0..<32 { r = (r<<1)|(v&1); v >>= 1 }
+    return [UInt8((r>>24)&0xFF),UInt8((r>>16)&0xFF),UInt8((r>>8)&0xFF),UInt8(r&0xFF)]
+}
+/// Distinct candidate forms of a key for an unlock sweep: as-is, byte-reversed, bit-mirrored.
+func keyForms(_ hex: String) -> [(String,[UInt8])] {
+    let b = keyBytes(hex)
+    var out: [(String,[UInt8])] = []
+    func add(_ tag: String, _ v: [UInt8]) { if !out.contains(where: {$0.1 == v}) { out.append((tag, v)) } }
+    add("", b); add("~rev", rev4(b)); add("~bitmirror", bitrev4(b))
+    return out
+}
+
+/// Password-read attempt: EM read with a key placed in the trailing field (for T5577 unlock sweeps).
+func lfReadPwd(pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
+    [0xFF,0x00,0x65,0x05,0x1E] + u32le(freq) + pad4(pwd)
+}
+
+// Password-aware LF write helpers (byte-array form avoids endianness confusion).
+//   T5577 block write (op 0x13): data word + password word (password = 0 for unprotected).
+func lfT5Write(addr: UInt8, word: [UInt8], pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
+    [0xFF,0x00,0x66,0x00,0x1E] + u32le(freq) + [0x13,0x00,addr] + pad4(word) + pad4(pwd)
+}
+//   EM4305 login (op 0x21) with a given password.
+func em4305LoginBytes(pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
+    [0xFF,0x00,0x66,0x00,0x1E] + u32le(freq) + [0x21] + pad4(pwd)
+}
+
+// T5577 HID-prox FSK config (block 0), wire order (= 0x00107060).
+let kT5HIDConfigWire: [UInt8] = [0x00,0x10,0x70,0x60]
+
 func parseU40(_ s: String) -> UInt64 {
     let t = s.trimmingCharacters(in: .whitespaces)
     let v: UInt64
