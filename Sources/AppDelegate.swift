@@ -118,14 +118,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fieldsBox.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(fieldsBox)
 
-        respRaw.isEditable = false; respRaw.font = mono(11)
-        let respScroll = NSScrollView(); respScroll.documentView = respRaw; respScroll.hasVerticalScroller = true; respScroll.borderType = .bezelBorder
-        respScroll.translatesAutoresizingMaskIntoConstraints = false
+        let respScroll = makeTextScroll(respRaw, mono(11))
         content.addSubview(respScroll)
 
-        logView = NSTextView(); logView.isEditable = false; logView.font = mono(10)
-        let logScroll = NSScrollView(); logScroll.documentView = logView; logScroll.hasVerticalScroller = true; logScroll.borderType = .bezelBorder
-        logScroll.translatesAutoresizingMaskIntoConstraints = false
+        logView = NSTextView()
+        let logScroll = makeTextScroll(logView, mono(10))
         content.addSubview(logScroll)
 
         let g = content
@@ -155,6 +152,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             logScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 90),
         ])
         window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Build a correctly-configured scrollable NSTextView. A programmatic NSTextView must have
+    /// its container/sizing set up or its text lays out at zero width and never shows.
+    func makeTextScroll(_ tv: NSTextView, _ font: NSFont) -> NSScrollView {
+        let sc = NSScrollView()
+        sc.hasVerticalScroller = true
+        sc.borderType = .bezelBorder
+        sc.translatesAutoresizingMaskIntoConstraints = false
+        sc.autohidesScrollers = false
+        let big = CGFloat.greatestFiniteMagnitude
+        tv.minSize = NSSize(width: 0, height: 0)
+        tv.maxSize = NSSize(width: big, height: big)
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = false
+        tv.autoresizingMask = [.width]
+        tv.isEditable = false
+        tv.isRichText = false
+        tv.drawsBackground = true
+        tv.font = font
+        tv.textContainerInset = NSSize(width: 4, height: 4)
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize = NSSize(width: 100, height: big)
+        tv.frame = NSRect(x: 0, y: 0, width: 400, height: 100)
+        sc.documentView = tv
+        return sc
     }
 
     func wrapScroll(_ v: NSView) -> NSView {
@@ -344,6 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     func log(_ s: String) {
         let ts = String(ISO8601DateFormatter().string(from: Date()).dropFirst(11).prefix(8))
+        NSLog("wCopyTool: %@", s)   // also to stderr/Console — visible when run from Terminal
         logView.textStorage?.append(NSAttributedString(string: "[\(ts)] \(s)\n",
             attributes: [.font: mono(10), .foregroundColor: NSColor.labelColor]))
         logView.scrollToEndOfDocument(nil)
