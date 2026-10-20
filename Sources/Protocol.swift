@@ -135,6 +135,53 @@ func lf65(mode: UInt8, freq: UInt32 = 125000, tail: [UInt8] = [0,0,0,0]) -> [UIn
     p += tail; return p
 }
 
+func u32be(_ v: UInt32) -> [UInt8] { [UInt8((v>>24)&0xFF), UInt8((v>>16)&0xFF), UInt8((v>>8)&0xFF), UInt8(v&0xFF)] }
+
+/// T5577 block write via the confirmed LF-write frame (op 0x13 on class 0x66):
+///   FF 00 66 00 1E <freq:u32 LE> 13 00 <block> <word:u32 BE> 00 00 00 00   (len 20)
+/// `word` is the 32-bit T5577 block value, MSB-first on the wire.
+func lfWriteBlock(block: UInt8, word: UInt32, freq: UInt32 = 125000) -> [UInt8] {
+    var p: [UInt8] = [0xFF, 0x00, 0x66, 0x00, 0x1E] + u32le(freq) + [0x13, 0x00, block]
+    p += u32be(word)
+    p += [0x00, 0x00, 0x00, 0x00]
+    return p
+}
+
+/// Standard EM4100 encoder: 40-bit id → 64-bit frame → (block1, block2) words.
+/// 9 header ones, 10×(4 data bits + even row parity), 4 column-parity bits, 1 stop bit (0).
+func em4100Words(_ id40: UInt64) -> (UInt32, UInt32) {
+    var bits = [Int]()
+    bits += Array(repeating: 1, count: 9)
+    var col = [0,0,0,0]
+    for n in 0..<10 {
+        let shift = (9 - n) * 4
+        let nib = Int((id40 >> UInt64(shift)) & 0xF)
+        var row = 0
+        for b in 0..<4 {
+            let bit = (nib >> (3 - b)) & 1
+            bits.append(bit); row ^= bit; col[b] ^= bit
+        }
+        bits.append(row)            // even row parity
+    }
+    for b in 0..<4 { bits.append(col[b]) }   // even column parity
+    bits.append(0)                           // stop bit
+    // pack MSB-first into two 32-bit words
+    func pack(_ r: Range<Int>) -> UInt32 {
+        var w: UInt32 = 0
+        for i in r { w = (w << 1) | UInt32(bits[i]) }
+        return w
+    }
+    return (pack(0..<32), pack(32..<64))
+}
+
+func parseU40(_ s: String) -> UInt64 {
+    let t = s.trimmingCharacters(in: .whitespaces)
+    let v: UInt64
+    if t.lowercased().hasPrefix("0x") { v = UInt64(t.dropFirst(2), radix: 16) ?? 0 }
+    else { v = UInt64(t) ?? 0 }
+    return v & 0xFF_FFFF_FFFF
+}
+
 // MARK: - Command registry
 
 let kCommands: [Command] = buildRegistry()

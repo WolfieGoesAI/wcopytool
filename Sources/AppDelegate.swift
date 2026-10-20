@@ -46,6 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let idFreq = NSTextField(string: "125000")
     let lfMode = NSTextField(string: "05")
     let lfTail = NSTextField(string: "00 00 00 00")
+    let lfWriteId = NSTextField(string: "1234567890")
+    let lfConfig = NSTextField(string: "00148040")
+    let lfBlk = NSTextField(string: "1")
+    let lfWord = NSTextField(string: "00000000")
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
     let rawFrame = NSTextField(string: "01 0F 00 00 FF 00 9A 5A A5 54 69 61 6E")
     var regFields: [UInt8: NSTextField] = [:]
@@ -273,11 +277,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                               var tail = parseHexBlob(s.lfTail.stringValue)
                               if tail.isEmpty { tail = [0,0,0,0] }
                               s.sendPayload(lf65(mode: parseByte(s.lfMode.stringValue), freq: parseU32(s.idFreq.stringValue), tail: tail), "LF 0x65 experiment") }])
-        let note = NSTextField(wrappingLabelWithString: "Read ID uses the confirmed LF command FF 00 65 05 1E <freq> 00 00 00 00; a 5-byte EM4100 id shows in UID. 0x68 = reader model/firmware, 0x69 = serial. The 0x65 experimenter is for finding the T5577 write mode (try mode values with a tail) — paste any reply that writes and I'll wire a Write ID button.")
+        // Write — T5577 EM4100 (data only, no lock). Writes blocks then reads back to verify.
+        let writeRow = hstack([labeled("Card #:", field(lfWriteId, 130)),
+                               labeled("Config:", field(lfConfig, 90)),
+                               ActionButton("Write EM4100 → T5577") { [weak self] in self?.writeT5577() }])
+        let blkRow = hstack([labeled("Block:", field(lfBlk, 40)),
+                             labeled("Word (hex):", field(lfWord, 100)),
+                             ActionButton("Write block") { [weak self] in self?.writeBlockManual() }])
+        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write is for T5577 EM4100 data only (no password/lock). Test on a spare card — the EM/T5577 block-write frame is confirmed, but the exact config word is being verified; the write auto-reads back so you can confirm. EM4305, T5577-HID-prox, and lock/unlock keys are the next staged steps.")
+        warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
+        let note = NSTextField(wrappingLabelWithString: "Read ID uses FF 00 65 05 1E <freq> 00 00 00 00 → 5-byte EM4100 id. 0x68 = model/firmware, 0x69 = serial. 0x65 experimenter is for probing other LF modes.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), dev, readRow, freqs, exp, note])
+        return vstack([head("125 kHz ID"), dev, readRow, freqs, writeRow, blkRow, exp, warn, note])
     }
     func setFreq(_ f: UInt32) { idFreq.stringValue = String(f) }
+
+    // Send a timed sequence so the reader isn't overrun; replies arrive via the input callback.
+    func sendSeq(_ items: [([UInt8], String)], gap: Double = 0.25) {
+        for (i, item) in items.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + gap * Double(i)) { [weak self] in
+                self?.sendPayload(item.0, item.1)
+            }
+        }
+    }
+
+    // T5577 EM4100 data write (no password/lock): blocks 1,2 = encoded id, block 0 = config, then verify.
+    func writeT5577() {
+        let id = parseU40(lfWriteId.stringValue)
+        let (w1, w2) = em4100Words(id)
+        let cfg = UInt32(lfConfig.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0x00148040
+        let freq = parseU32(idFreq.stringValue)
+        log(String(format: "T5577 write id=%010llX  blk1=%08X blk2=%08X cfg=%08X", id, w1, w2, cfg))
+        sendSeq([
+            (lfWriteBlock(block: 1, word: w1, freq: freq), "write block 1"),
+            (lfWriteBlock(block: 2, word: w2, freq: freq), "write block 2"),
+            (lfWriteBlock(block: 0, word: cfg, freq: freq), "write block 0 (config)"),
+            (lfRead(freq: freq), "verify read"),
+        ])
+    }
+    func writeBlockManual() {
+        let blk = parseByte(lfBlk.stringValue)
+        let word = UInt32(lfWord.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0
+        sendPayload(lfWriteBlock(block: blk, word: word, freq: parseU32(idFreq.stringValue)),
+                    String(format: "write block %d = %08X", Int(blk), word))
+    }
 
     func pageConfig() -> NSView {
         // MFRC522 register defaults from the hidden Config panel
