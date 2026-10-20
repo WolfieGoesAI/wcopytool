@@ -313,24 +313,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func writeEM() {
         let id = parseU40(lfWriteId.stringValue)
         let (w1, w2) = em4100Words(id)
-        let cfg = UInt32(lfConfig.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0x00148040
         let freq = parseU32(idFreq.stringValue)
-        let op = chipEM4305 ? kOpEM4305 : kOpT5577
-        let chip = chipEM4305 ? "EM4305" : "T5577"
-        log(String(format: "%@ write id=%010llX  w1=%08X w2=%08X cfg=%08X", chip, id, w1, w2, cfg))
-        sendSeq([
-            (lfWriteWord(op: op, addr: 1, word: w1, freq: freq), "\(chip) addr 1"),
-            (lfWriteWord(op: op, addr: 2, word: w2, freq: freq), "\(chip) addr 2"),
-            (lfWriteWord(op: op, addr: 0, word: cfg, freq: freq), "\(chip) addr 0 (config)"),
-            (lfRead(freq: freq), "verify read"),
-        ])
+        if chipEM4305 {
+            // Native EM4305: login, then word5/6 = data, word4 = config. Verify.
+            log(String(format: "EM4305 write id=%010llX  w1=%08X w2=%08X", id, w1, w2))
+            sendSeq([
+                (em4305Login(pwd: 0, freq: freq), "EM4305 login(0)"),
+                (em4305WriteWord(addr: 5, bytes: u32be(w1), freq: freq), "EM4305 word5 (data1)"),
+                (em4305WriteWord(addr: 6, bytes: u32be(w2), freq: freq), "EM4305 word6 (data2)"),
+                (em4305WriteWord(addr: 4, bytes: kEM4305ConfigWire, freq: freq), "EM4305 word4 (config)"),
+                (lfRead(freq: freq), "verify read"),
+            ])
+        } else {
+            let cfg = UInt32(lfConfig.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0x00148040
+            log(String(format: "T5577 write id=%010llX  w1=%08X w2=%08X cfg=%08X", id, w1, w2, cfg))
+            sendSeq([
+                (lfWriteBlock(block: 1, word: w1, freq: freq), "T5577 block 1"),
+                (lfWriteBlock(block: 2, word: w2, freq: freq), "T5577 block 2"),
+                (lfWriteBlock(block: 0, word: cfg, freq: freq), "T5577 block 0 (config)"),
+                (lfRead(freq: freq), "verify read"),
+            ])
+        }
     }
     func writeBlockManual() {
-        let blk = parseByte(lfBlk.stringValue)
+        let addr = parseByte(lfBlk.stringValue)
         let word = UInt32(lfWord.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0
-        let op = chipEM4305 ? kOpEM4305 : kOpT5577
-        sendPayload(lfWriteWord(op: op, addr: blk, word: word, freq: parseU32(idFreq.stringValue)),
-                    String(format: "%@ write addr %d = %08X", chipEM4305 ? "EM4305" : "T5577", Int(blk), word))
+        let freq = parseU32(idFreq.stringValue)
+        if chipEM4305 {
+            sendPayload(em4305WriteWord(addr: addr, bytes: u32be(word), freq: freq),
+                        String(format: "EM4305 write word %d = %08X", Int(addr), word))
+        } else {
+            sendPayload(lfWriteBlock(block: addr, word: word, freq: freq),
+                        String(format: "T5577 write block %d = %08X", Int(addr), word))
+        }
     }
 
     func pageConfig() -> NSView {

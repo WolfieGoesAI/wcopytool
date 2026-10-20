@@ -154,6 +154,18 @@ func lfWriteBlock(block: UInt8, word: UInt32, freq: UInt32 = 125000) -> [UInt8] 
     lfWriteWord(op: kOpT5577, addr: block, word: word, freq: freq)
 }
 
+// Native EM4305 (class 0x66, confirmed from the handler):
+//   login:      FF 00 66 00 1E <freq:u32 LE> 21 <password:u32 LE>          (op 0x21)
+//   write word: FF 00 66 00 1E <freq:u32 LE> 22 <addr> <word: 4 bytes>     (op 0x22)
+// EM4100 emulation writes word 4 = config (wire FA 01 A8 00), words 5 & 6 = EM data.
+func em4305Login(pwd: UInt32, freq: UInt32 = 125000) -> [UInt8] {
+    [0xFF, 0x00, 0x66, 0x00, 0x1E] + u32le(freq) + [0x21] + u32le(pwd)
+}
+func em4305WriteWord(addr: UInt8, bytes: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
+    [0xFF, 0x00, 0x66, 0x00, 0x1E] + u32le(freq) + [0x22, addr] + Array(bytes.prefix(4))
+}
+let kEM4305ConfigWire: [UInt8] = [0xFA, 0x01, 0xA8, 0x00]   // word 4 config for EM4100 (from app)
+
 /// Standard EM4100 encoder: 40-bit id → 64-bit frame → (block1, block2) words.
 /// 9 header ones, 10×(4 data bits + even row parity), 4 column-parity bits, 1 stop bit (0).
 func em4100Words(_ id40: UInt64) -> (UInt32, UInt32) {
