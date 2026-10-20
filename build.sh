@@ -61,19 +61,21 @@ rm -f build/${APP}.x86_64 build/${APP}.arm64
 
 cp Info.plist "${BUNDLE}/Contents/Info.plist"
 
-# App icon. Prefer a canonical iconutil-built .icns (macOS); fall back to the committed one.
+# App icon. Build a canonical .icns from the committed 1024px PNG with sips + iconutil
+# (both ship with macOS — no Python/Pillow needed on the runner). Fall back to the committed icns.
 ICNS=""
-if command -v iconutil >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-  if python3 -I icon/make_icon.py --iconset >/dev/null 2>&1 && [ -d build/AppIcon.iconset ]; then
-    if iconutil -c icns build/AppIcon.iconset -o build/AppIcon.icns 2>/dev/null; then
-      ICNS="build/AppIcon.icns"
-      echo "==> icon built with iconutil"
-    fi
+if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1 && [ -f Resources/icon_1024.png ]; then
+  SET="build/AppIcon.iconset"; mkdir -p "${SET}"
+  ok=1
+  for spec in "16:16x16" "32:16x16@2x" "32:32x32" "64:32x32@2x" "128:128x128" "256:128x128@2x" "256:256x256" "512:256x256@2x" "512:512x512" "1024:512x512@2x"; do
+    px="${spec%%:*}"; name="${spec##*:}"
+    sips -z "${px}" "${px}" Resources/icon_1024.png --out "${SET}/icon_${name}.png" >/dev/null 2>&1 || ok=0
+  done
+  if [ "${ok}" = "1" ] && iconutil -c icns "${SET}" -o build/AppIcon.icns 2>/dev/null; then
+    ICNS="build/AppIcon.icns"; echo "==> icon built with sips + iconutil"
   fi
 fi
-if [ -z "${ICNS}" ] && [ -f Resources/AppIcon.icns ]; then
-  ICNS="Resources/AppIcon.icns"
-fi
+if [ -z "${ICNS}" ] && [ -f Resources/AppIcon.icns ]; then ICNS="Resources/AppIcon.icns"; fi
 if [ -n "${ICNS}" ]; then
   cp "${ICNS}" "${BUNDLE}/Contents/Resources/AppIcon.icns"
   echo "==> icon installed (${ICNS})"
