@@ -61,6 +61,15 @@ rm -f build/${APP}.x86_64 build/${APP}.arm64
 
 cp Info.plist "${BUNDLE}/Contents/Info.plist"
 
+# App icon: regenerate the .icns if Python/Pillow is available, else use the committed one.
+if [ ! -f Resources/AppIcon.icns ] && command -v python3 >/dev/null 2>&1; then
+  python3 -I icon/make_icon.py 2>/dev/null || true
+fi
+if [ -f Resources/AppIcon.icns ]; then
+  cp Resources/AppIcon.icns "${BUNDLE}/Contents/Resources/AppIcon.icns"
+  echo "==> icon installed"
+fi
+
 # Show the stamped minimum-OS per slice (visible in the CI log for verification).
 if command -v otool >/dev/null 2>&1; then
   echo "==> Mach-O minimum OS per slice:"

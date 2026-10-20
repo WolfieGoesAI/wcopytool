@@ -45,11 +45,22 @@ Developer ID needed for personal use).
 
 1. Plug in the copier. The status bar turns green with `VID:PID  product  SN:…` when matched
    (VIDs `0416`/`2518`). Hit **Rescan** if you hotplug.
-2. Pick a command in the left tree. Its description, editable parameters, and the exact
-   **framed request bytes** appear on the right.
-3. **Send** (⌘↵). The reply shows up parsed, with the raw 64-byte dump below and everything
-   timestamped in the log.
-4. Start with **Reader control ▸ Init / Unlock handshake** — the Windows app sends this first.
+2. The window has tabs that mirror the Windows app:
+   - **Card (13.56)** — Init/unlock, detect, read number, get version, and the write ops
+     (MF1 / CUID·FUID / GTU / GDM) as opcode-labelled buttons.
+   - **Sectors (Mifare)** — key A/B, S50/S70, block address, Auth / Read / Write block, dump all.
+   - **NTAG** — page read/write, read-all, CFG pages.
+   - **125 kHz ID** — experimental LF sends to help discover that path.
+   - **Config (RC522)** — the MFRC522 register values (with defaults) → write via class 0x85.
+   - **Advanced** — hidden control opcodes (toggle, slot select, attack helpers).
+   - **Raw** — send any payload (auto-framed) or a verbatim 64-byte frame to replay captures.
+3. Every button sends immediately; the result lands in the shared **Parsed response** fields
+   (UID / ATQA / SAK / ATS / Version / Status), the **raw hex** pane, and the timestamped log.
+4. Start with **Card ▸ Init / Unlock** — the Windows app sends this handshake first.
+
+Each button's label carries the confirmed opcode; the action names are the best match to the
+Windows buttons. The exact argument layout inside the `0x66` transceive envelope is still being
+confirmed on hardware, so treat the write/sector buttons as test frames and watch the replies.
 
 ### Finishing the map on hardware
 The transport, framing, checksum, device IDs, command classes and opcodes are recovered
