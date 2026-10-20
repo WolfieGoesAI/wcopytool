@@ -137,14 +137,21 @@ func lf65(mode: UInt8, freq: UInt32 = 125000, tail: [UInt8] = [0,0,0,0]) -> [UIn
 
 func u32be(_ v: UInt32) -> [UInt8] { [UInt8((v>>24)&0xFF), UInt8((v>>16)&0xFF), UInt8((v>>8)&0xFF), UInt8(v&0xFF)] }
 
-/// T5577 block write via the confirmed LF-write frame (op 0x13 on class 0x66):
-///   FF 00 66 00 1E <freq:u32 LE> 13 00 <block> <word:u32 BE> 00 00 00 00   (len 20)
-/// `word` is the 32-bit T5577 block value, MSB-first on the wire.
-func lfWriteBlock(block: UInt8, word: UInt32, freq: UInt32 = 125000) -> [UInt8] {
-    var p: [UInt8] = [0xFF, 0x00, 0x66, 0x00, 0x1E] + u32le(freq) + [0x13, 0x00, block]
+// LF write ops on class 0x66 (both confirmed from the Write-ID handler):
+let kOpT5577: UInt8 = 0x13   // T5577 block write  (20-byte frame)
+let kOpEM4305: UInt8 = 0x12  // EM4305 word write  (16-byte frame)
+
+/// LF word/block write. op 0x13 = T5577 (sends the 20-byte frame), op 0x12 = EM4305 (16-byte).
+///   FF 00 66 00 1E <freq:u32 LE> <op> 00 <addr> <word:u32 BE> [00 00 00 00 for T5577]
+func lfWriteWord(op: UInt8, addr: UInt8, word: UInt32, freq: UInt32 = 125000) -> [UInt8] {
+    var p: [UInt8] = [0xFF, 0x00, 0x66, 0x00, 0x1E] + u32le(freq) + [op, 0x00, addr]
     p += u32be(word)
-    p += [0x00, 0x00, 0x00, 0x00]
+    if op == kOpT5577 { p += [0x00, 0x00, 0x00, 0x00] }
     return p
+}
+// Back-compat helper used by the verified T5577 path.
+func lfWriteBlock(block: UInt8, word: UInt32, freq: UInt32 = 125000) -> [UInt8] {
+    lfWriteWord(op: kOpT5577, addr: block, word: word, freq: freq)
 }
 
 /// Standard EM4100 encoder: 40-bit id → 64-bit frame → (block1, block2) words.

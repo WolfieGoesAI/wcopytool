@@ -50,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let lfConfig = NSTextField(string: "00148040")
     let lfBlk = NSTextField(string: "1")
     let lfWord = NSTextField(string: "00000000")
+    var chipEM4305 = false   // false = T5577 (op 0x13), true = EM4305 (op 0x12)
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
     let rawFrame = NSTextField(string: "01 0F 00 00 FF 00 9A 5A A5 54 69 61 6E")
     var regFields: [UInt8: NSTextField] = [:]
@@ -277,18 +278,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                               var tail = parseHexBlob(s.lfTail.stringValue)
                               if tail.isEmpty { tail = [0,0,0,0] }
                               s.sendPayload(lf65(mode: parseByte(s.lfMode.stringValue), freq: parseU32(s.idFreq.stringValue), tail: tail), "LF 0x65 experiment") }])
-        // Write — T5577 EM4100 (data only, no lock). Writes blocks then reads back to verify.
+        // Write — EM4100 to the selected chip (T5577 / EM4305). Writes data+config then reads back.
+        let t5 = NSButton(radioButtonWithTitle: "T5577", target: self, action: #selector(chipChanged(_:)))
+        let em = NSButton(radioButtonWithTitle: "EM4305", target: self, action: #selector(chipChanged(_:)))
+        t5.tag = 0; em.tag = 1; t5.state = .on
+        let chipRow = hstack([NSTextField(labelWithString: "Chip:"), t5, em])
         let writeRow = hstack([labeled("Card #:", field(lfWriteId, 130)),
                                labeled("Config:", field(lfConfig, 90)),
-                               ActionButton("Write EM4100 → T5577") { [weak self] in self?.writeT5577() }])
-        let blkRow = hstack([labeled("Block:", field(lfBlk, 40)),
+                               ActionButton("Write EM4100") { [weak self] in self?.writeEM() }])
+        let blkRow = hstack([labeled("Addr:", field(lfBlk, 40)),
                              labeled("Word (hex):", field(lfWord, 100)),
-                             ActionButton("Write block") { [weak self] in self?.writeBlockManual() }])
-        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write is for T5577 EM4100 data only (no password/lock). Test on a spare card — the EM/T5577 block-write frame is confirmed, but the exact config word is being verified; the write auto-reads back so you can confirm. EM4305, T5577-HID-prox, and lock/unlock keys are the next staged steps.")
+                             ActionButton("Write word") { [weak self] in self?.writeBlockManual() }])
+        let warn = NSTextField(wrappingLabelWithString: "⚠︎ EM4100 data write only (no password/lock). T5577 op 0x13 is verified working; EM4305 op 0x12 uses the same frame/encoder — test on a spare EM4305 and check the auto read-back (its config word may differ from T5577's 00148040). HID-prox formats and lock/unlock keys are the next staged steps.")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
         let note = NSTextField(wrappingLabelWithString: "Read ID uses FF 00 65 05 1E <freq> 00 00 00 00 → 5-byte EM4100 id. 0x68 = model/firmware, 0x69 = serial. 0x65 experimenter is for probing other LF modes.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), dev, readRow, freqs, writeRow, blkRow, exp, warn, note])
+        return vstack([head("125 kHz ID"), dev, readRow, freqs, chipRow, writeRow, blkRow, exp, warn, note])
     }
     func setFreq(_ f: UInt32) { idFreq.stringValue = String(f) }
 
@@ -301,25 +306,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         }
     }
 
-    // T5577 EM4100 data write (no password/lock): blocks 1,2 = encoded id, block 0 = config, then verify.
-    func writeT5577() {
+    @objc func chipChanged(_ sender: NSButton) { chipEM4305 = (sender.tag == 1) }
+
+    // EM4100 data write to the selected chip (T5577 op 0x13 / EM4305 op 0x12): data to addr 1,2,
+    // config to addr 0, then read back to verify. No password/lock.
+    func writeEM() {
         let id = parseU40(lfWriteId.stringValue)
         let (w1, w2) = em4100Words(id)
         let cfg = UInt32(lfConfig.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0x00148040
         let freq = parseU32(idFreq.stringValue)
-        log(String(format: "T5577 write id=%010llX  blk1=%08X blk2=%08X cfg=%08X", id, w1, w2, cfg))
+        let op = chipEM4305 ? kOpEM4305 : kOpT5577
+        let chip = chipEM4305 ? "EM4305" : "T5577"
+        log(String(format: "%@ write id=%010llX  w1=%08X w2=%08X cfg=%08X", chip, id, w1, w2, cfg))
         sendSeq([
-            (lfWriteBlock(block: 1, word: w1, freq: freq), "write block 1"),
-            (lfWriteBlock(block: 2, word: w2, freq: freq), "write block 2"),
-            (lfWriteBlock(block: 0, word: cfg, freq: freq), "write block 0 (config)"),
+            (lfWriteWord(op: op, addr: 1, word: w1, freq: freq), "\(chip) addr 1"),
+            (lfWriteWord(op: op, addr: 2, word: w2, freq: freq), "\(chip) addr 2"),
+            (lfWriteWord(op: op, addr: 0, word: cfg, freq: freq), "\(chip) addr 0 (config)"),
             (lfRead(freq: freq), "verify read"),
         ])
     }
     func writeBlockManual() {
         let blk = parseByte(lfBlk.stringValue)
         let word = UInt32(lfWord.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0
-        sendPayload(lfWriteBlock(block: blk, word: word, freq: parseU32(idFreq.stringValue)),
-                    String(format: "write block %d = %08X", Int(blk), word))
+        let op = chipEM4305 ? kOpEM4305 : kOpT5577
+        sendPayload(lfWriteWord(op: op, addr: blk, word: word, freq: parseU32(idFreq.stringValue)),
+                    String(format: "%@ write addr %d = %08X", chipEM4305 ? "EM4305" : "T5577", Int(blk), word))
     }
 
     func pageConfig() -> NSView {
