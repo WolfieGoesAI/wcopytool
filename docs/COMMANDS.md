@@ -142,6 +142,20 @@ Confirmed replies:
 - `FF 00 66 00 1E … 12 …` (detect) → `02 07 01 00 00 F5 FD` → 1-byte status `00` (no card / not the
   active-poll opcode for this reader's LF side).
 
+## 4b. 125 kHz LF channel — CLASS 0x65  (CONFIRMED on hardware)
+
+LF is a **separate class, 0x65** (HF transceive is 0x66). From the Read-ID handler:
+
+- **Read EM4100**: `FF 00 65 05 1E <freq:u32 LE> 00 00 00 00`  (mode `05` = read 5-byte id).
+  - Reply: `02 0C 01 00 05 <5 id bytes> CHK FD`. Verified: card `00 49 96 02 D2` → `0x499602D2` = 1234567890.
+  - Frequency table (Hz): 125000 (`48 E8 01 00`), 175000, 250000, 300000, 375000, 500000.
+
+- **Write ID (T5577)** — from the Write-ID handler, the write frame is on the **0x66** channel:
+  `FF 00 66 00 1E <freq:u32> 13 <p10> <p11> <dataWord:u32> <arg:u32>` (len 20, op `0x13`).
+  The handler first runs the target id through an EM/T5577 **bit encoder** to produce the data
+  words, then calls a read-back verify (`FF 00 66 00 1E <freq> 00 …`). Porting that encoder is
+  required for a safe one-click write — not yet implemented (guessed data words risk bricking cards).
+
 ## 5. Response fields  (formats confirmed from the binary)
 
 Replies are the same 64-byte frame. The payload after the `FF 00 CLASS` echo carries a

@@ -284,8 +284,13 @@ func parseResponse(_ report: [UInt8]) -> ParsedResponse {
     r.status = String(format: "%@  status=0x%02X  len=%d  (%@)", kind, Int(status), payload.count, r.note)
     // LF EM4100 read reply: payload = [05, id0..id4] (6 bytes).
     if payload.count == 6 && payload[0] == 0x05 {
-        r.uid = hex(Array(payload[1..<6]))
-        r.status += "  EM4100 ID"
+        let id = Array(payload[1..<6])
+        r.uid = hex(id)
+        let v40 = id.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        let v32 = v40 & 0xFFFF_FFFF
+        let hex10 = id.map { String(format: "%02X", $0) }.joined()
+        r.ascii = String(format: "EM4100  hex10=%@  dec=%llu  (cust=%02X)", hex10, v32, Int(id[0]))
+        r.status = "EM4100 read OK"
         return r
     }
     // Heuristic HF UID: a short all-binary payload of 4/7/10 bytes.
