@@ -124,6 +124,17 @@ func transceive(op: UInt8, a: UInt32, b: UInt32) -> [UInt8] {
     return p
 }
 
+// 125 kHz LF channel is CLASS 0x65 (confirmed from the Read-ID handler):
+//   FF 00 65 <mode> 1E <freq:u32 LE> <a:u16> <b:u16>
+// mode 0x05 = read 5-byte EM4100 id. Reply: 02 0C 01 00 05 <5 id bytes> CHK FD.
+func lfRead(freq: UInt32 = 125000) -> [UInt8] {
+    [0xFF, 0x00, 0x65, 0x05, 0x1E] + u32le(freq) + [0x00, 0x00, 0x00, 0x00]
+}
+func lf65(mode: UInt8, freq: UInt32 = 125000, tail: [UInt8] = [0,0,0,0]) -> [UInt8] {
+    var p: [UInt8] = [0xFF, 0x00, 0x65, mode, 0x1E] + u32le(freq)
+    p += tail; return p
+}
+
 // MARK: - Command registry
 
 let kCommands: [Command] = buildRegistry()
@@ -271,7 +282,13 @@ func parseResponse(_ report: [UInt8]) -> ParsedResponse {
     r.ascii = payload.isEmpty ? "—" : asciiOf(payload)
     let kind = stx == 0x02 ? "response" : "request"
     r.status = String(format: "%@  status=0x%02X  len=%d  (%@)", kind, Int(status), payload.count, r.note)
-    // Heuristic UID: a short all-binary payload (no printable run) of 4/7/10 bytes.
+    // LF EM4100 read reply: payload = [05, id0..id4] (6 bytes).
+    if payload.count == 6 && payload[0] == 0x05 {
+        r.uid = hex(Array(payload[1..<6]))
+        r.status += "  EM4100 ID"
+        return r
+    }
+    // Heuristic HF UID: a short all-binary payload of 4/7/10 bytes.
     let printable = payload.filter { (0x20...0x7e).contains($0) }.count
     if (payload.count == 4 || payload.count == 7 || payload.count == 10) && printable < payload.count {
         r.uid = hex(payload)

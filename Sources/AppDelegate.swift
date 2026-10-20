@@ -44,6 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let ntagPage = NSTextField(string: "4")
     let ntagData = NSTextField(string: "00000000")
     let idFreq = NSTextField(string: "125000")
+    let lfMode = NSTextField(string: "05")
+    let lfTail = NSTextField(string: "00 00 00 00")
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
     let rawFrame = NSTextField(string: "01 0F 00 00 FF 00 9A 5A A5 54 69 61 6E")
     var regFields: [UInt8: NSTextField] = [:]
@@ -247,24 +249,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func pageID() -> NSView {
-        // Confirmed from live captures:
         let dev = hstack([
             ActionButton("Device info (0x68)") { [weak self] in self?.sendPayload([0xFF,0x00,0x68], "device info") },
             ActionButton("Serial number (0x69)") { [weak self] in self?.sendPayload([0xFF,0x00,0x69], "serial") },
         ])
-        // Read probes — find which returns the LF card id (watch Data/ASCII below):
-        let probes = hstack([labeled("A/freq:", field(idFreq, 90)),
-                             ActionButton("Read 0x12") { [weak self] in self?.idTx(0x12) },
-                             ActionButton("Read 0x13") { [weak self] in self?.idTx(0x13) },
-                             ActionButton("Read 0x1F") { [weak self] in self?.idTx(0x1F) }])
-        let ctrl = hstack([ActionButton("Toggle 0x6A 01") { [weak self] in self?.sendPayload([0xFF,0x00,0x6A,0x01], "toggle") },
-                           ActionButton("Slot 0x6B 30") { [weak self] in self?.sendPayload([0xFF,0x00,0x6B,0x30], "slot 30") },
-                           ActionButton("Slot 0x6B 31") { [weak self] in self?.sendPayload([0xFF,0x00,0x6B,0x31], "slot 31") }])
-        let note = NSTextField(wrappingLabelWithString: "0x68 returns the reader model/firmware, 0x69 its serial. The read probes use the 0x66 transceive engine — put an EM/125 kHz card on the reader and watch the Data/ASCII fields to see which one returns the card id; tell me the opcode + bytes and I'll wire a proper Read/Write ID.")
+        // Confirmed LF read: FF 00 65 05 1E <freq> 00 00 00 00 → reply 02 0C 01 00 05 <5-byte EM id> CHK FD
+        let readRow = hstack([labeled("Freq (Hz):", field(idFreq, 90)),
+                              ActionButton("Read ID (EM4100)") { [weak self] in
+                                  guard let s = self else { return }
+                                  s.sendPayload(lfRead(freq: parseU32(s.idFreq.stringValue)), "LF read EM4100") }])
+        let freqs = hstack([NSTextField(labelWithString: "Freqs:"),
+                            ActionButton("125k") { [weak self] in self?.setFreq(125000) },
+                            ActionButton("175k") { [weak self] in self?.setFreq(175000) },
+                            ActionButton("250k") { [weak self] in self?.setFreq(250000) },
+                            ActionButton("300k") { [weak self] in self?.setFreq(300000) },
+                            ActionButton("375k") { [weak self] in self?.setFreq(375000) },
+                            ActionButton("500k") { [weak self] in self?.setFreq(500000) }])
+        // 0x65 experimenter — for discovering the T5577 write mode (watch the reply).
+        let exp = hstack([labeled("0x65 mode:", field(lfMode, 50)),
+                          labeled("tail hex:", field(lfTail, 180)),
+                          ActionButton("Send 0x65") { [weak self] in
+                              guard let s = self else { return }
+                              var tail = parseHexBlob(s.lfTail.stringValue)
+                              if tail.isEmpty { tail = [0,0,0,0] }
+                              s.sendPayload(lf65(mode: parseByte(s.lfMode.stringValue), freq: parseU32(s.idFreq.stringValue), tail: tail), "LF 0x65 experiment") }])
+        let note = NSTextField(wrappingLabelWithString: "Read ID uses the confirmed LF command FF 00 65 05 1E <freq> 00 00 00 00; a 5-byte EM4100 id shows in UID. 0x68 = reader model/firmware, 0x69 = serial. The 0x65 experimenter is for finding the T5577 write mode (try mode values with a tail) — paste any reply that writes and I'll wire a Write ID button.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), dev, probes, ctrl, note])
+        return vstack([head("125 kHz ID"), dev, readRow, freqs, exp, note])
     }
-    func idTx(_ op: UInt8) { tx(op, a: parseU32(idFreq.stringValue)) }
+    func setFreq(_ f: UInt32) { idFreq.stringValue = String(f) }
 
     func pageConfig() -> NSView {
         // MFRC522 register defaults from the hidden Config panel
@@ -336,7 +349,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func ntagRead() { tx(0x42, b: parseU32(ntagPage.stringValue)) }
     func ntagWrite() { tx(0x33, b: parseU32(ntagPage.stringValue), extra: Array(parseHexBlob(ntagData.stringValue).prefix(4))) }
     func ntagReadAll() { for p in 0..<135 { tx(0x42, b: UInt32(p)) } }
-    func idRead() { tx(0x12, a: parseU32(idFreq.stringValue)) }
     func writeRegs() {
         var body: [UInt8] = [0xFF,0x00,0x85,0x12]
         for (addr, tf) in regFields.sorted(by: { $0.key < $1.key }) { body.append(addr); body.append(parseByte(tf.stringValue)) }
