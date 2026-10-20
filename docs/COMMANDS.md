@@ -150,11 +150,29 @@ LF is a **separate class, 0x65** (HF transceive is 0x66). From the Read-ID handl
   - Reply: `02 0C 01 00 05 <5 id bytes> CHK FD`. Verified: card `00 49 96 02 D2` → `0x499602D2` = 1234567890.
   - Frequency table (Hz): 125000 (`48 E8 01 00`), 175000, 250000, 300000, 375000, 500000.
 
-- **Write ID (T5577)** — from the Write-ID handler, the write frame is on the **0x66** channel:
-  `FF 00 66 00 1E <freq:u32> 13 <p10> <p11> <dataWord:u32> <arg:u32>` (len 20, op `0x13`).
-  The handler first runs the target id through an EM/T5577 **bit encoder** to produce the data
-  words, then calls a read-back verify (`FF 00 66 00 1E <freq> 00 …`). Porting that encoder is
-  required for a safe one-click write — not yet implemented (guessed data words risk bricking cards).
+### LF write — EM4100 emulation (both CONFIRMED on hardware)
+
+Data words come from the standard EM4100 64-bit encoder (9 ones header, 10×[4 data + row
+parity], 4 column parity, stop 0 → two 32-bit words, sent MSB-first).
+
+**T5577** (op `0x13`, 20-byte frame): `FF 00 66 00 1E <freq> 13 00 <block> <word:u32 BE> <pwd:u32>`
+  - block 1 = data word1, block 2 = data word2, block 0 = config `0x00148040` (wire `00 14 80 40`).
+  - 2nd word = T5577 password (0 for unprotected). Unlock key set the app tries:
+    `0x9A00F5C0, 0x00000000, 0x27049219, 0x48580B1C, 0x6E616954`("Tian"); it sets the password to
+    "Tian" in block 7 when locking.
+
+**Native EM4305** (CONFIRMED): class 0x66, two ops —
+  - login:      `FF 00 66 00 1E <freq> 21 <password:u32 LE>`           (op `0x21`)
+  - write word: `FF 00 66 00 1E <freq> 22 <addr> <word: 4 bytes>`      (op `0x22`)
+  - EM4100: word 5 = data1, word 6 = data2, word 4 = config (wire `FA 01 A8 00`). EM4305 password
+    is word 2; login key set tried by the app: `0x00000000, 0x9F3BD705, 0x6E616954`("Tian").
+  - (The device also accepts op `0x12`, a T5577-style block write, which EM4305 ignores — not used.)
+
+Reply to writes is `02 07 01 00 00 F5 FD` (status 0 = write-ACK); confirm via the EM read.
+
+### Still to do
+- **T5577 → HID prox** (26–37-bit Wiegand): FSK config + Wiegand encoder (ref: Proxmark3 iceman `lf hid`).
+- **Lock / unlock** per chip using the key sets above (destructive — gate behind confirmation).
 
 ## 5. Response fields  (formats confirmed from the binary)
 
