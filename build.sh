@@ -61,13 +61,22 @@ rm -f build/${APP}.x86_64 build/${APP}.arm64
 
 cp Info.plist "${BUNDLE}/Contents/Info.plist"
 
-# App icon: regenerate the .icns if Python/Pillow is available, else use the committed one.
-if [ ! -f Resources/AppIcon.icns ] && command -v python3 >/dev/null 2>&1; then
-  python3 -I icon/make_icon.py 2>/dev/null || true
+# App icon. Prefer a canonical iconutil-built .icns (macOS); fall back to the committed one.
+ICNS=""
+if command -v iconutil >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  if python3 -I icon/make_icon.py --iconset >/dev/null 2>&1 && [ -d build/AppIcon.iconset ]; then
+    if iconutil -c icns build/AppIcon.iconset -o build/AppIcon.icns 2>/dev/null; then
+      ICNS="build/AppIcon.icns"
+      echo "==> icon built with iconutil"
+    fi
+  fi
 fi
-if [ -f Resources/AppIcon.icns ]; then
-  cp Resources/AppIcon.icns "${BUNDLE}/Contents/Resources/AppIcon.icns"
-  echo "==> icon installed"
+if [ -z "${ICNS}" ] && [ -f Resources/AppIcon.icns ]; then
+  ICNS="Resources/AppIcon.icns"
+fi
+if [ -n "${ICNS}" ]; then
+  cp "${ICNS}" "${BUNDLE}/Contents/Resources/AppIcon.icns"
+  echo "==> icon installed (${ICNS})"
 fi
 
 # Show the stamped minimum-OS per slice (visible in the CI log for verification).

@@ -59,8 +59,24 @@ def build_icns(path):
     with open(path, 'wb') as f: f.write(body)
     master.resize((512,512), Image.LANCZOS).save(os.path.join(os.path.dirname(path) or '.', 'icon.png'))
 
+def build_iconset(dirpath):
+    """Emit a standard AppIcon.iconset for `iconutil -c icns` (canonical path)."""
+    os.makedirs(dirpath, exist_ok=True)
+    master = render(1024)
+    spec = [(16,1),(16,2),(32,1),(32,2),(128,1),(128,2),(256,1),(256,2),(512,1),(512,2)]
+    for base, scale in spec:
+        px = base*scale
+        name = "icon_%dx%d%s.png" % (base, base, "@2x" if scale==2 else "")
+        master.resize((px, px), Image.LANCZOS).save(os.path.join(dirpath, name))
+
 if __name__ == '__main__':
-    out = os.path.join(os.path.dirname(__file__), '..', 'Resources', 'AppIcon.icns')
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    build_icns(out)
-    print('wrote', os.path.normpath(out))
+    import sys
+    root = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
+    if '--iconset' in sys.argv:
+        d = os.path.join(root, 'build', 'AppIcon.iconset')
+        build_iconset(d); print('wrote', d)
+    else:
+        out = os.path.join(root, 'Resources', 'AppIcon.icns')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        build_icns(out)
+        print('wrote', os.path.normpath(out))
