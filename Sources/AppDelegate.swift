@@ -584,6 +584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
         if recPhase != .idle { handleRecovery(bytes) }
         else if unlockActive { handleUnlock(bytes) }
+        else if let id = recEMid(bytes) { lfWriteId.stringValue = String(id) }  // Read ID → Card #
     }
 
     func log(_ s: String) {
