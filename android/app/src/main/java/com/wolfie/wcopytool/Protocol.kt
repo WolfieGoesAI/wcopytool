@@ -74,6 +74,11 @@ object Proto {
     fun lfT5WriteNoPwd(addr: Int, word: IntArray, freq: Long = 125000) =
         intArrayOf(0xFF, 0x00, 0x66, 0x00, 0x1E) + u32le(freq) + intArrayOf(0x12, 0x00, addr) + word
     fun hidReadCmd() = intArrayOf(0xFF, 0x00, 0x6A, 0x01, 0x00, 0x08)
+    // EM4305: login (op 0x21) and write-word (op 0x22). EM4100 emulation: word4 = config, words 5/6 = data.
+    fun em4305Login(pwd: IntArray, freq: Long = 125000) = intArrayOf(0xFF, 0x00, 0x66, 0x00, 0x1E) + u32le(freq) + intArrayOf(0x21) + pwd
+    fun em4305Write(addr: Int, word: IntArray, freq: Long = 125000) = intArrayOf(0xFF, 0x00, 0x66, 0x00, 0x1E) + u32le(freq) + intArrayOf(0x22, addr) + word
+    val EM4305_CONFIG = intArrayOf(0xFA, 0x01, 0xA8, 0x00)      // word4 config for EM4100
+    val EM4305_NORMALIZE = listOf("00000000", "05D73B9F")
 
     // ---- replies ----
     fun recEMid(p: Parsed?): Long? {

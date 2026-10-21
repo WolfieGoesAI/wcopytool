@@ -104,6 +104,48 @@ class UsbReader(private val mgr: UsbManager) {
         log("done")
     }
 
+    // ---- EM4305 write (login-authenticated word writes) ----
+    fun writeEM4305(id: Long, protect: Boolean, pwd: String, cur: String, freq: Long, log: (String) -> Unit) {
+        val zero = intArrayOf(0, 0, 0, 0)
+        val setPwd = if (protect) Proto.fieldKey(pwd) else zero
+        val (w1, w2) = Proto.em4100Words(id)
+        val cands = ArrayList<IntArray>()
+        addDedup(cands, Proto.fieldKey(cur)); addDedup(cands, zero)
+        log("EM4305 write id $id")
+        val seq = ArrayList<IntArray>()
+        for (c in cands) { seq.add(Proto.em4305Login(c, freq)); seq.add(Proto.em4305Write(2, setPwd, freq)) }
+        seq.add(Proto.em4305Login(setPwd, freq))
+        seq.add(Proto.em4305Write(5, Proto.u32be(w1), freq)); seq.add(Proto.em4305Write(6, Proto.u32be(w2), freq))
+        seq.add(Proto.em4305Write(4, Proto.EM4305_CONFIG, freq))
+        sendSeq(seq, log); log("done")
+    }
+    private fun addDedup(l: ArrayList<IntArray>, k: IntArray) { if (l.none { eq(it, k) }) l.add(k) }
+
+    // ---- identifying EM4305 unlock ----
+    fun unlockEM4305(keys: List<IntArray>, freq: Long, log: (String) -> Unit): String {
+        val orig = readEMId(freq) ?: run { log("no card"); return "no card" }
+        val marker = orig xor 1
+        val (mw1, mw2) = Proto.em4100Words(marker)
+        fun probe(k: IntArray) { transact(Proto.em4305Login(k, freq)); transact(Proto.em4305Write(5, Proto.u32be(mw1), freq)); transact(Proto.em4305Write(6, Proto.u32be(mw2), freq)); Thread.sleep(120) }
+        probe(intArrayOf(0, 0, 0, 0))
+        if (readEMId(freq) == marker) { restoreEM(orig, null, freq); log("card has no password (not protected)"); return "no password" }
+        for ((i, k) in keys.withIndex()) {
+            probe(k)
+            if (readEMId(freq) == marker) { restoreEM(orig, k, freq); val ks = Proto.hexJoin(k); log("password is $ks"); return ks }
+            if (i % 8 == 7) log("…tried ${i + 1}/${keys.size}")
+        }
+        log("not found in ${keys.size} keys"); return "not found"
+    }
+    private fun restoreEM(id: Long, foundKey: IntArray?, freq: Long) {
+        val (w1, w2) = Proto.em4100Words(id)
+        val seq = ArrayList<IntArray>()
+        if (foundKey != null) { seq.add(Proto.em4305Login(foundKey, freq)); seq.add(Proto.em4305Write(2, intArrayOf(0, 0, 0, 0), freq)) }
+        seq.add(Proto.em4305Login(intArrayOf(0, 0, 0, 0), freq))
+        seq.add(Proto.em4305Write(5, Proto.u32be(w1), freq)); seq.add(Proto.em4305Write(6, Proto.u32be(w2), freq))
+        seq.add(Proto.em4305Write(4, Proto.EM4305_CONFIG, freq)); seq.add(Proto.lfRead(freq))
+        sendSeq(seq) {}
+    }
+
     // ---- identifying T5577 unlock: find the key, restore id, clear protection ----
     fun unlockT5577(keys: List<IntArray>, freq: Long, log: (String) -> Unit): String {
         val orig = readEMId(freq) ?: run { log("no card"); return "no card" }

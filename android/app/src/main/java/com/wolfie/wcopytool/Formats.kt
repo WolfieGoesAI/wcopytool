@@ -15,5 +15,10 @@ object Fmt {
         return (if (t.startsWith("0x", true)) t.drop(2).toLongOrNull(16) else t.toLongOrNull()) ?: 0
     }
     fun parseDec0(s: String): Long { val v = parseDec(s); return if (v <= 0) 125000 else v }
+    fun parseDecId(s: String): Long {   // EM4100 id as a decimal number (hex fallback), 40-bit
+        val t = s.trim()
+        val v = t.toLongOrNull() ?: if (t.startsWith("0x", true)) t.drop(2).toLongOrNull(16) ?: 0 else t.toLongOrNull(16) ?: 0
+        return v and 0xFFFFFFFFFFL
+    }
     fun idHex(id: Long) = "%010X".format(id)
 }
