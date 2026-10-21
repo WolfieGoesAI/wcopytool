@@ -52,6 +52,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let lfWriteId = NSTextField(string: "1234567890")
     let lfPwd = NSTextField(string: "00000000")
     let lfProtect = NSButton(checkboxWithTitle: "Password-protect written card", target: nil, action: nil)
+    let lfChangePwd = NSButton(checkboxWithTitle: "Change the current password to", target: nil, action: nil)
+    let lfNewPwd = NSTextField(string: "00000000")
     let lfT5Found = NSTextField(string: "00000000")   // editable: found or user-entered password
     let lfEMFound = NSTextField(string: "00000000")
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
@@ -273,6 +275,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         // Protection for the written card: unchecked = no password; checked = set the password below
         // (blank = 00000000). The written card's config PWD bit follows this checkbox.
         let protectRow = hstack([lfProtect, labeled("Write Lock Password:", field(lfPwd, 100))])
+        // Change the stored password WITHOUT protecting (greyed out while Password-protect is on).
+        lfProtect.target = self; lfProtect.action = #selector(protectToggled)
+        let changeRow = hstack([lfChangePwd, field(lfNewPwd, 100)])
+        syncProtectGrey()
         // Unlock finds the card's current password (tries known keys + the password fields), clears
         // it, and writes the found password into the Unlock Password field.
         let foundRow = hstack([
@@ -280,9 +286,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ActionButton("Unlock T5577") { [weak self] in self?.unlockCard(false) },
             labeled("EM4305 Unlock Password:", field(lfEMFound, 100)),
             ActionButton("Unlock EM4305") { [weak self] in self?.unlockCard(true) }])
-        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write authenticates with the card\u{2019}s CURRENT password — the \u{201C}Unlock Password\u{201D} field for that chip (leave blank for an unprotected card); if it\u{2019}s wrong the write is simply rejected. Tick \u{201C}Password-protect\u{201D} to lock the written card with the Write Lock Password (blank = 00000000, config 00148050); leave it unticked to write unprotected (config 00148040). Unlock finds the password by trying every known key plus the two password fields, clears it, and fills the found value into the Unlock Password field.")
+        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write authenticates with the card\u{2019}s CURRENT password — the \u{201C}Unlock Password\u{201D} field for that chip (leave blank for an unprotected card); if it\u{2019}s wrong the write is simply rejected. Tick \u{201C}Password-protect\u{201D} to lock the written card with the Write Lock Password (config 00148050). Or tick \u{201C}Change the current password to\u{201D} to store a new password WITHOUT protecting the card (config 00148040). With neither ticked the card is written unprotected with password 0. Unlock finds the password by trying every known key plus the two password fields, clears it, and fills the found value into the Unlock Password field.")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), readRow, writeRow, protectRow, foundRow, warn])
+        return vstack([head("125 kHz ID"), readRow, writeRow, protectRow, changeRow, foundRow, warn])
     }
 
     // Send a timed sequence so the reader isn't overrun; replies arrive via the input callback.
@@ -334,9 +340,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // Password field (blank counts as 00000000). We never set "Tian" — it is only tried as a
     // CURRENT password to authenticate a card the original app previously locked.
     func protectOn() -> Bool { lfProtect.state == .on }
+    func changePwdOn() -> Bool { lfChangePwd.state == .on }
+    @objc func protectToggled() { syncProtectGrey() }
+    // While Password-protect is on, the "Change the current password" controls are disabled.
+    func syncProtectGrey() {
+        let on = protectOn()
+        lfChangePwd.isEnabled = !on
+        lfNewPwd.isEnabled = !on
+        lfNewPwd.textColor = on ? .disabledControlTextColor : .controlTextColor
+    }
     // The NEW password to set: the Password field when the checkbox is ticked (blank = 00000000);
     // otherwise 00000000 (card left unprotected).
-    func targetPwd() -> [UInt8] { protectOn() ? fieldKey(lfPwd.stringValue) : [0,0,0,0] }
+    // The password to store (block 7 / word 2) on the next write:
+    //  • Protect ticked  → the Write Lock Password, and the card is write-protected (PWD bit set).
+    //  • Change ticked    → the new password, but the card is NOT protected (PWD bit clear).
+    //  • neither          → 0 (unprotected, password cleared).
+    func targetPwd() -> [UInt8] {
+        if protectOn() { return fieldKey(lfPwd.stringValue) }
+        if changePwdOn() { return fieldKey(lfNewPwd.stringValue) }
+        return [0,0,0,0]
+    }
     // Parse a text field as a 4-byte key only when it is exactly 8 hex digits; otherwise 0 (so
     // status text like "swept — now pwd 0" is treated as no password, not garbage).
     func fieldKey(_ s: String) -> [UInt8] {
@@ -522,7 +545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // the Unlock Password field, restore the id and clear protection. Per key K: authenticate with K
     // and write a MARKER id with no/zero password; only the correct key lets the marker take, so only
     // then does the read change. Safe: only the matching key changes data, and it is restored.
-    enum ULPhase { case idle, baseline, test }
+    enum ULPhase { case idle, baseline, precheck, test }
     var ulActive = false
     var ulEM = false
     var ulPhase: ULPhase = .idle
@@ -564,6 +587,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                      (lfT5Write(addr: 1, word: u32be(mw1), pwd: [0,0,0,0], freq: ulFreq), "probe blk1"),
                      (lfT5Write(addr: 2, word: u32be(mw2), pwd: [0,0,0,0], freq: ulFreq), "probe blk2") ]
         }
+    }
+    // Pre-check: write the marker with NO password / password 0, without changing block 7 or
+    // logging in with a key. If it takes, the card is already unprotected (so the sweep would
+    // otherwise false-positive on the first key). Only if it's rejected do we sweep.
+    func ulPrecheckQueue() -> [([UInt8], String)] {
+        let (mw1, mw2) = em4100Words(ulMarker)
+        if ulEM {
+            return [ (em4305LoginBytes(pwd: [0,0,0,0], freq: ulFreq), "login 0"),
+                     (em4305WriteWord(addr: 5, bytes: u32be(mw1), freq: ulFreq), "pre w5"),
+                     (em4305WriteWord(addr: 6, bytes: u32be(mw2), freq: ulFreq), "pre w6") ]
+        } else {
+            return [ (lfT5Write(addr: 1, word: u32be(mw1), pwd: [0,0,0,0], freq: ulFreq), "pre blk1"),
+                     (lfT5Write(addr: 2, word: u32be(mw2), pwd: [0,0,0,0], freq: ulFreq), "pre blk2") ]
+        }
+    }
+    func ulUnprotected() {
+        ulActive = false; ulPhase = .idle
+        ulField().stringValue = "00000000"
+        log("✓ Unlock \(ulEM ? "EM4305" : "T5577"): card has no password (not write-protected). Restoring id \(String(format: "%010llX", ulOrigId)).")
+        let (w1, w2) = em4100Words(ulOrigId)
+        writeExpectId = ulOrigId; writeExpectEM = ulEM
+        var seq: [([UInt8], String)]
+        if ulEM {
+            seq = [ (em4305LoginBytes(pwd: [0,0,0,0], freq: ulFreq), "login 0"),
+                    (em4305WriteWord(addr: 5, bytes: u32be(w1), freq: ulFreq), "w5 restore"),
+                    (em4305WriteWord(addr: 6, bytes: u32be(w2), freq: ulFreq), "w6 restore"),
+                    (lfRead(freq: ulFreq), "verify read") ]
+        } else {
+            seq = [ (lfT5Write(addr: 1, word: u32be(w1), pwd: [0,0,0,0], freq: ulFreq), "restore blk1"),
+                    (lfT5Write(addr: 2, word: u32be(w2), pwd: [0,0,0,0], freq: ulFreq), "restore blk2"),
+                    (lfRead(freq: ulFreq), "verify read") ]
+        }
+        sendSeq(seq, gap: 0.2)
     }
     func ulNextKey() {
         guard ulIdx < ulKeys.count else {
@@ -615,8 +671,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                 log("✗ Unlock: no card to read."); return
             }
             ulOrigId = id; ulMarker = id ^ 1                    // a different, still-valid id to probe with
-            ulReadRetries = 0; ulIdx = 0; ulPhase = .test
-            ulNextKey()
+            ulReadRetries = 0; ulPhase = .precheck              // first check if the card is already unprotected
+            ulQueue = ulPrecheckQueue(); ulAwaitRead = false; ulStep()
+        case .precheck:
+            if !ulAwaitRead { ulStep(); return }
+            if let id = emid {
+                if id == ulMarker { ulUnprotected() }           // no password needed → card is open
+                else { ulReadRetries = 0; ulIdx = 0; ulPhase = .test; ulNextKey() }   // protected → sweep keys
+            } else if ulReadRetries < 3 {
+                ulReadRetries += 1
+                afterDelay(ulSettle) { [weak self] in guard let s = self else { return }; s.sendPayload(lfRead(freq: s.ulFreq), "probe read") }
+            } else { ulReadRetries = 0; ulIdx = 0; ulPhase = .test; ulNextKey() }
         case .test:
             if !ulAwaitRead { ulStep(); return }                // a write/login ack arrived → send next command
             if let id = emid {
