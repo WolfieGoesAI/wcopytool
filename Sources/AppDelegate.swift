@@ -283,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ActionButton("Unlock T5577") { [weak self] in self?.unlockCard(false) },
             labeled("EM4305 pwd:", field(lfEMFound, 100)),
             ActionButton("Unlock EM4305") { [weak self] in self?.unlockCard(true) }])
-        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write / Write all LF / Revive rewrite every LF chip type (T5577 + EM4305) the way the original app does: each block written op12 (no pwd) then op13 (pwd), after authenticating the card with known keys — this is what makes cards the reader detects and revives a silent card. Leave \u{201C}Password-protect\u{201D} unchecked to write an unprotected card (config 00148040); check it to lock the card with the Password below (blank = 00000000, config 00148050). \u{201C}Find pwd\u{201D} is read-only. Unlock clears an existing password.")
+        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write authenticates with the card\u{2019}s CURRENT password — the \u{201C}T5577 pwd\u{201D} / \u{201C}EM4305 pwd\u{201D} field (leave blank for an unprotected card); if it\u{2019}s wrong the write is simply rejected. Tick \u{201C}Password-protect\u{201D} to lock the written card with the Password field (blank = 00000000, config 00148050); leave it unticked to write unprotected (config 00148040). To clear an unknown password, use Unlock — it safely tries every known key and rewrites the same id. \u{201C}Find pwd\u{201D} can only recover a READ-protected card; a card that reads without a password (most T5577s) is write-protected only and its password cannot be found by reading — use Unlock instead.")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
         return vstack([head("125 kHz ID"), dev, readRow, writeRow, protectRow, findRow, foundRow, warn])
     }
@@ -336,55 +336,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // The password to SET on the written card. Unchecked = unprotected (00000000). Checked = the
     // Password field (blank counts as 00000000). We never set "Tian" — it is only tried as a
     // CURRENT password to authenticate a card the original app previously locked.
-    func targetPwd() -> [UInt8] {
-        guard lfProtect.state == .on else { return [0,0,0,0] }
-        let t = lfPwd.stringValue.trimmingCharacters(in: .whitespaces)
-        return t.isEmpty ? [0,0,0,0] : keyBytes(t)
-    }
     func protectOn() -> Bool { lfProtect.state == .on }
-    // Current-password candidates used to AUTHENTICATE a card so we can rewrite it: the known keys
-    // (incl. "Tian" and the app's set) plus the password typed in the field, plus the new one.
-    func authKeys() -> [[UInt8]] {
-        var keys = kT5NormalizeKeys.map { keyBytes($0) }
-        let t = lfPwd.stringValue.trimmingCharacters(in: .whitespaces)
-        if !t.isEmpty { keys = [keyBytes(t)] + keys }
-        let np = targetPwd(); if !keys.contains(where: { $0 == np }) { keys.append(np) }
-        return keys
+    // The NEW password to set: the Password field when the checkbox is ticked (blank = 00000000);
+    // otherwise 00000000 (card left unprotected).
+    func targetPwd() -> [UInt8] { protectOn() ? fieldKey(lfPwd.stringValue) : [0,0,0,0] }
+    // Parse a text field as a 4-byte key only when it is exactly 8 hex digits; otherwise 0 (so
+    // status text like "swept — now pwd 0" is treated as no password, not garbage).
+    func fieldKey(_ s: String) -> [UInt8] {
+        let h = s.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " ", with: "")
+        return (h.count == 8 && h.allSatisfy { $0.isHexDigit }) ? keyBytes(h) : [0,0,0,0]
     }
 
+    // T5577 write. Authenticates ONLY with the current password in the "T5577 pwd" field (empty =
+    // unprotected). Sets the new password to the "Password" field when the protect checkbox is
+    // ticked, else leaves the card unprotected. No key sweep — to clear an unknown password, use
+    // Unlock T5577 first. If the auth password is wrong the writes are rejected and the card is
+    // unchanged.
     func t5577Seq(id: UInt64) -> [([UInt8], String)] {
         let freq = parseU32(idFreq.stringValue)
         let (w1, w2) = em4100Words(id)
-        let setPwd = targetPwd()
-        // Config: PWD bit set (00148050) only when protecting; else PWD clear (00148040).
+        let authPwd = fieldKey(lfT5Found.stringValue)   // current password (to write a protected card)
+        let setPwd = targetPwd()                         // new password to set
         let cfg: [UInt8] = protectOn() ? [0x00,0x14,0x80,0x50] : [0x00,0x14,0x80,0x40]
         var seq: [([UInt8], String)] = []
-        // Normalize: write block 7 = new password, authenticating with each candidate current key.
-        for k in authKeys() { seq.append((lfT5Write(addr: 7, word: setPwd, pwd: k, freq: freq), "T5 set pwd (auth \(hex(k)))")) }
-        for (blk, data, name) in [(UInt8(1), u32be(w1), "T5 block1"), (2, u32be(w2), "T5 block2"), (0, cfg, "T5 block0 cfg")] {
+        // Change the password first (block 7), authenticating with the current password.
+        seq.append((lfT5Write(addr: 7, word: setPwd, pwd: authPwd, freq: freq), "block7 = new pwd (auth \(hex(authPwd)))"))
+        // Then write data + config, authenticating with the (now) new password.
+        for (blk, data, name) in [(UInt8(1), u32be(w1), "block1"), (2, u32be(w2), "block2"), (0, cfg, "block0 cfg")] {
             seq.append((lfT5WriteNoPwd(addr: blk, word: data, freq: freq), "\(name) op12"))
             seq.append((lfT5Write(addr: blk, word: data, pwd: setPwd, freq: freq), "\(name) op13"))
         }
         return seq
     }
-    // EM4305 portion: authenticate with known login keys, set word2 = new password, then write
-    // word5/6 = data and word4 = config (FA01A800). New password 0 = unprotected.
+    // EM4305 write. Authenticates with the "EM4305 pwd" field (empty = unprotected), sets the new
+    // password from the Password field when the checkbox is ticked, else leaves it unprotected.
     func em4305Seq(id: UInt64) -> [([UInt8], String)] {
         let freq = parseU32(idFreq.stringValue)
         let (w1, w2) = em4100Words(id)
+        let authPwd = fieldKey(lfEMFound.stringValue)
         let setPwd = targetPwd()
         var seq: [([UInt8], String)] = []
-        // login candidates: 0, 9F3BD705, Tian, the typed/new password.
-        var logins = kEM4305NormalizeKeys.map { keyBytes($0) } + [keyBytes("5469616E")]
-        let np = setPwd; if !logins.contains(where: { $0 == np }) { logins.append(np) }
-        for k in logins {
-            seq.append((em4305LoginBytes(pwd: k, freq: freq), "EM login \(hex(k))"))
-            seq.append((em4305WriteWord(addr: 2, bytes: setPwd, freq: freq), "EM word2 = new pwd"))
-        }
-        seq.append((em4305LoginBytes(pwd: setPwd, freq: freq), "EM login new pwd"))
-        seq.append((em4305WriteWord(addr: 5, bytes: u32be(w1), freq: freq), "EM word5 data1"))
-        seq.append((em4305WriteWord(addr: 6, bytes: u32be(w2), freq: freq), "EM word6 data2"))
-        seq.append((em4305WriteWord(addr: 4, bytes: kEM4305ConfigWire, freq: freq), "EM word4 cfg"))
+        seq.append((em4305LoginBytes(pwd: authPwd, freq: freq), "login (current \(hex(authPwd)))"))
+        seq.append((em4305WriteWord(addr: 2, bytes: setPwd, freq: freq), "word2 = new pwd"))
+        seq.append((em4305LoginBytes(pwd: setPwd, freq: freq), "login (new pwd)"))
+        seq.append((em4305WriteWord(addr: 5, bytes: u32be(w1), freq: freq), "word5 data1"))
+        seq.append((em4305WriteWord(addr: 6, bytes: u32be(w2), freq: freq), "word6 data2"))
+        seq.append((em4305WriteWord(addr: 4, bytes: kEM4305ConfigWire, freq: freq), "word4 cfg"))
         return seq
     }
 
