@@ -363,18 +363,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var recVerifyRetries = 0
     var recReadRetries = 0
     var recConfirming = false  // second read to confirm a marker hit (guards read noise)
+    var recSamples: [UInt64] = []   // initial reads, to learn which bits flicker
+    var recStableMask: UInt64 = 0   // bits the card reads consistently
 
-    // Compare two EM ids ignoring the low byte (some cards flicker the LSB between reads).
-    func sameIgnoreLSB(_ a: UInt64, _ b: UInt64) -> Bool { (a & 0xFF_FFFF_FF00) == (b & 0xFF_FFFF_FF00) }
+    // A read indicates the marker was written iff it matches on every stable bit.
+    func recMatchesMarker(_ id: UInt64) -> Bool { (id & recStableMask) == (recMarker & recStableMask) }
 
     func findPwd(_ em4305: Bool) {
         guard recPhase == .idle, !unlockActive else { log("busy — another operation is running"); return }
         recEM = em4305; recFreq = parseU32(idFreq.stringValue)
         (em4305 ? lfEMFound : lfT5Found).stringValue = "searching…"
         recCands = kLFKeyDict.flatMap { k in keyForms(k).map { (k + $0.0, $0.1) } }
-        recIdx = 0; recPhase = .readOrig; recReadRetries = 0
-        log("Find \(em4305 ? "EM4305" : "T5577") password: reading current id…")
-        sendPayload(lfRead(freq: recFreq), "read current id")
+        recIdx = 0; recPhase = .readOrig; recReadRetries = 0; recSamples = []
+        log("Find \(em4305 ? "EM4305" : "T5577") password: sampling current id…")
+        sendPayload(lfRead(freq: recFreq), "sample id")
     }
     func recEMid(_ bytes: [UInt8]) -> UInt64? {
         guard let (p, _, _, _) = Frame.parse(bytes), p.count == 6, p[0] == 0x05 else { return nil }
@@ -429,14 +431,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         switch recPhase {
         case .readOrig:
             if let id = emid {
-                recOrig = id
-                recMarker = id ^ 0x00_FFFF_00   // flip two middle bytes (robust to LSB read noise)
+                recSamples.append(id)
+                if recSamples.count < 6 {                 // keep sampling to learn flicker
+                    sendPayload(lfRead(freq: recFreq), "sample id")
+                    return
+                }
+                // unstable bits = any that differ across samples; keep the majority value.
+                var unstable: UInt64 = 0
+                for s in recSamples { unstable |= (s ^ recSamples[0]) }
+                recStableMask = (~unstable) & 0xFF_FFFF_FFFF
+                var counts: [UInt64: Int] = [:]
+                for s in recSamples { counts[s, default: 0] += 1 }
+                recOrig = counts.max { $0.value < $1.value }!.key
+                recMarker = recOrig ^ recStableMask        // flip all stable bits → card can't read this itself
+                if recStableMask.nonzeroBitCount < 8 {
+                    log("✗ card read too unstable to test reliably; aborting")
+                    (recEM ? lfEMFound : lfT5Found).stringValue = "unstable read"
+                    recPhase = .idle; return
+                }
                 recIdx = 0; recPhase = .verify
-                log(String(format: "current id=%010llX marker=%010llX — sweeping %d candidates", recOrig, recMarker, recCands.count))
+                log(String(format: "id=%010llX stable=%010llX marker=%010llX — sweeping %d candidates",
+                           recOrig, recStableMask, recMarker, recCands.count))
                 tryRecCandidate()
-            } else if recReadRetries < 6 {
+            } else if recReadRetries < 8 {
                 recReadRetries += 1
-                sendPayload(lfRead(freq: recFreq), "re-read id")
+                sendPayload(lfRead(freq: recFreq), "re-sample id")
             } else {
                 log("✗ no card detected to read; aborting")
                 (recEM ? lfEMFound : lfT5Found).stringValue = "no card"
@@ -453,7 +472,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             }
             if recAwaitVerify {
                 if let id = emid {
-                    if sameIgnoreLSB(id, recMarker) {
+                    if recMatchesMarker(id) {
                         if recConfirming {                 // confirmed twice → real hit
                             recAwaitVerify = false; recConfirming = false; recFound()
                         } else {                            // first hit → read again to confirm
