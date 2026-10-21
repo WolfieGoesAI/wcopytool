@@ -311,7 +311,45 @@ let kT5HIDConfigWire: [UInt8] = [0x00,0x10,0x70,0x60]
 
 // LF prox formats this app can write. HID 26/37 are capture-verified; AWID 26 is spec-based
 // (Proxmark getAWIDBits) and WRITE-ONLY (this reader can't read AWID back) — verify on another reader.
-enum HIDFormat: Int { case h10301 = 0, h10304 = 1, awid26 = 2 }   // HID 26-bit, HID 37-bit, AWID 26-bit
+enum HIDFormat: Int { case h10301 = 0, h10304 = 1, awid26 = 2, paradox = 3 }   // HID 26/37, AWID 26, Paradox
+
+// Dallas/Maxim CRC-8 (poly 0x31 reflected = 0x8C, init 0), used by Paradox.
+func crc8Maxim(_ data: [UInt8]) -> UInt8 {
+    var crc: UInt8 = 0
+    for b in data {
+        crc ^= b
+        for _ in 0..<8 { crc = (crc & 1) != 0 ? (crc >> 1) ^ 0x8C : (crc >> 1) }
+    }
+    return crc
+}
+// Manchester-encode the low 16 bits (MSB first, 0→01, 1→10) → 32-bit, per Proxmark.
+func manchesterEncode2Bytes(_ d: UInt32) -> UInt32 {
+    var r: UInt32 = 0
+    for i in stride(from: 15, through: 0, by: -1) {
+        let bit = (d >> UInt32(i)) & 1
+        r = (r << 2) | (bit != 0 ? 0b10 : 0b01)
+    }
+    return r
+}
+// Paradox (FSK2a, RF/50) → three T5577 data blocks. Same config 0x00107060 as HID/AWID.
+// Port of Proxmark getParadoxBits; VERIFIED byte-for-byte: FC=8,CN=36619 → RAW 0f55555559595aa559a5566a.
+func paradoxBlocks(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
+    var m = [UInt8](repeating: 0, count: 13)
+    m[0] = 0x0F; m[1] = 0x05; m[2] = 0x55; m[3] = 0x55           // preamble + leading zeros
+    var t = manchesterEncode2Bytes(fc & 0xFF)
+    m[4] = UInt8((t >> 8) & 0xFF); m[5] = UInt8(t & 0xFF)
+    t = manchesterEncode2Bytes(cn & 0xFFFF)
+    m[6] = UInt8((t >> 24) & 0xFF); m[7] = UInt8((t >> 16) & 0xFF)
+    m[8] = UInt8((t >> 8) & 0xFF);  m[9] = UInt8(t & 0xFF)
+    let crc = crc8Maxim(Array(m[1...9])) ^ 0x06
+    t = manchesterEncode2Bytes(UInt32(crc))
+    m[10] = UInt8((t >> 8) & 0xFF); m[11] = UInt8(t & 0xFF)
+    for i in 1...11 { m[i] = UInt8((UInt32(m[i]) << 4 | UInt32(m[i + 1]) >> 4) & 0xFF) }  // nibble realign
+    m[11] |= 0x08; m[11] |= 0x02                                  // trailer 1010
+    var out = [UInt32](repeating: 0, count: 3)
+    for i in 0..<12 { out[i / 4] |= UInt32(m[i]) << (8 * (3 - UInt32(i % 4))) }
+    return out
+}
 
 // AWID 26-bit (FSK2a, RF/50) → three T5577 data blocks (blocks 1-3). Same T5577 config as HID
 // (0x00107060). Built per Proxmark getAWIDBits: 96-bit stream = 8-bit preamble 00000001, then
@@ -348,8 +386,9 @@ func awid26Blocks(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
 // Blocks 1-3 for any supported LF prox format.
 func lfProxBlocks(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> [UInt32] {
     switch fmt {
-    case .awid26: return awid26Blocks(fc, cn)
-    default:      return hidT5BlocksV(hidValue(fmt, fc, cn))
+    case .awid26:  return awid26Blocks(fc, cn)
+    case .paradox: return paradoxBlocks(fc, cn)
+    default:       return hidT5BlocksV(hidValue(fmt, fc, cn))
     }
 }
 
@@ -383,7 +422,7 @@ func hidValue(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> UInt64 {
     switch fmt {
     case .h10301: return 0x2000000000 | (UInt64(1) << 26) | UInt64(hidWiegand26(fc, cn))
     case .h10304: return hidWiegand37(fc, cn)
-    case .awid26: return 0            // AWID doesn't use the HID "value" path (see awid26Blocks)
+    case .awid26, .paradox: return 0  // these use their own block builders, not the HID "value" path
     }
 }
 
