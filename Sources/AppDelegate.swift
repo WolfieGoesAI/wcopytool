@@ -54,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var cardFmt = 0                                   // current Card # format index
     let lfFormats = NSTextField(wrappingLabelWithString: "")   // Proxmark-style breakdown
     let lfPwd = NSTextField(string: "00000000")
-    let lfProtect = NSButton(checkboxWithTitle: "Password-protect written card", target: nil, action: nil)
+    let lfProtect = NSButton(checkboxWithTitle: "Password-protect written card with password:", target: nil, action: nil)
     let lfT5Found = NSTextField(string: "00000000")   // editable: found or user-entered password
     let lfEMFound = NSTextField(string: "00000000")
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
@@ -283,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         lfFormats.font = mono(10); lfFormats.textColor = .secondaryLabelColor; lfFormats.preferredMaxLayoutWidth = 900
         refreshFormats(currentCardId())
         // Protection for the written card: unchecked = no password; checked = lock with the password.
-        let protectRow = hstack([lfProtect, labeled("Write Lock Password:", field(lfPwd, 100))])
+        let protectRow = hstack([lfProtect, field(lfPwd, 100)])
         // Unlock finds the card's current password (tries known keys + the password fields), clears
         // it, and writes the found password into the Unlock Password field.
         let foundRow = hstack([
@@ -291,7 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ActionButton("Unlock T5577") { [weak self] in self?.unlockCard(false) },
             labeled("EM4305 Unlock Password:", field(lfEMFound, 100)),
             ActionButton("Unlock EM4305") { [weak self] in self?.unlockCard(true) }])
-        return vstack([head("125 kHz ID"), readRow, writeRow, lfFormats, protectRow, foundRow])
+        return vstack([readRow, writeRow, lfFormats, protectRow, foundRow])
     }
 
     // ---- Card-number formats (EM4100 / Proxmark style) ----
