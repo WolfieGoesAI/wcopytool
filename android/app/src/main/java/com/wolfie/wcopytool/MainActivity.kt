@@ -9,10 +9,13 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
@@ -24,6 +27,23 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+// Palette matching the ChipBurner Android app (dark, amber-primary).
+private object Pal {
+    val ground = Color(0xFF15171A); val card = Color(0xFF1E2125); val raised = Color(0xFF2A2E33)
+    val bar = Color(0xFF1B1E21); val line = Color(0xFF3A3F45); val text = Color(0xFFECE8E1)
+    val text2 = Color(0xFFA39E95); val amber = Color(0xFFF2A33A); val amberLight = Color(0xFFFFC170)
+    val amberDim = Color(0xFF3A2E1A); val onAmber = Color(0xFF1B1408); val uv = Color(0xFF8F86F0)
+    val red = Color(0xFFFF9A8B); val redBg = Color(0xFF3A1F1C)
+}
+private fun appColorScheme() = darkColorScheme(
+    primary = Pal.amber, onPrimary = Pal.onAmber, primaryContainer = Pal.amberDim, onPrimaryContainer = Pal.amberLight,
+    secondary = Pal.uv, background = Pal.ground, onBackground = Pal.text, surface = Pal.card, onSurface = Pal.text,
+    surfaceVariant = Pal.raised, onSurfaceVariant = Pal.text2, outline = Pal.line,
+    surfaceContainer = Pal.bar, surfaceContainerHigh = Pal.card, surfaceContainerLow = Pal.ground,
+    secondaryContainer = Pal.amberDim, onSecondaryContainer = Pal.amberLight,
+    error = Pal.red, errorContainer = Pal.redBg,
+)
 
 class MainActivity : ComponentActivity() {
     private lateinit var usb: UsbManager
@@ -64,7 +84,7 @@ class MainActivity : ComponentActivity() {
         }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(receiver, filter)
-        setContent { MaterialTheme(colorScheme = if (isSystemDark()) darkColorScheme() else lightColorScheme()) { App() } }
+        setContent { MaterialTheme(colorScheme = appColorScheme()) { App() } }
         connect()
     }
     override fun onDestroy() { super.onDestroy(); try { unregisterReceiver(receiver) } catch (_: Exception) {}; reader.close() }
@@ -80,30 +100,33 @@ class MainActivity : ComponentActivity() {
         // shared state
         val freq = remember { mutableStateOf("125000") }
         val keyText = remember { mutableStateOf(Proto.DEFAULT_KEYS.joinToString("\n")) }
-        var tab by remember { mutableIntStateOf(0) }
+        val titles = listOf("125 kHz ID", "HID Prox", "Passwords", "Log")
+        val pager = rememberPagerState(pageCount = { titles.size })
 
         Scaffold(topBar = {
             TopAppBar(title = { Text("wCopyTool — LF", fontSize = 16.sp) }, actions = {
                 TextButton(onClick = { connect() }) { Text(if (reader.connected) "Reconnect" else "Connect") }
             })
         }) { pad ->
-            Column(Modifier.padding(pad).padding(12.dp).fillMaxSize()) {
+            Column(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
                 Text(status.value, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.height(6.dp))
-                TabRow(selectedTabIndex = tab) {
-                    listOf("125 kHz ID", "HID Prox", "Passwords").forEachIndexed { i, t ->
-                        Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t, fontSize = 12.sp) })
+                ScrollableTabRow(selectedTabIndex = pager.currentPage, edgePadding = 0.dp) {
+                    titles.forEachIndexed { i, t ->
+                        Tab(selected = pager.currentPage == i, onClick = { scope.launch { pager.animateScrollToPage(i) } }, text = { Text(t, fontSize = 12.sp) })
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                Box(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                    when (tab) {
-                        0 -> LfIdTab(freq, keyText, ::go)
-                        1 -> HidTab(freq, keyText, ::go)
-                        else -> PasswordsTab(keyText)
+                HorizontalPager(state = pager, modifier = Modifier.weight(1f).fillMaxWidth()) { page ->
+                    Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                        when (page) {
+                            0 -> LfIdTab(freq, keyText, ::go)
+                            1 -> HidTab(freq, keyText, ::go)
+                            2 -> PasswordsTab(keyText)
+                            else -> LogTab(logLines)
+                        }
                     }
                 }
-                LogView(logLines)
             }
         }
     }
@@ -118,10 +141,6 @@ class MainActivity : ComponentActivity() {
         val bitRev = remember { mutableStateOf(false) }
         val byteRev = remember { mutableStateOf(false) }
         val f = 125000L
-        fun applyFound(field: MutableState<String>, res: String) {
-            if (res.length == 8 && res.all { it.isDigit() || it in 'A'..'F' }) field.value = res
-            else if (res == "no password") field.value = "00000000"
-        }
         Column {
             HexField("Card number (decimal)", id)
             Row { Btn("Read ID") { go { val v = reader.readEMId(f); if (v != null) { id.value = v.toString(); log("✓ ID $v") } else log("✗ no card") } } }
@@ -187,7 +206,7 @@ class MainActivity : ComponentActivity() {
             Row {
                 Btn("Unlock HID → EM") { go {
                     val keys = reader.expandKeys(unlockKeys(keyText.value, cur.value, pwd.value, false), bitRev.value, byteRev.value)
-                    reader.unlockHID(keys, 1L, Fmt.parseDec0(freq.value), ::log)
+                    applyFound(cur, reader.unlockHID(keys, 1L, Fmt.parseDec0(freq.value), ::log))
                 } }
             }
             RevRow("Unlock also try:", bitRev, byteRev)
@@ -253,11 +272,15 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-    @Composable fun LogView(lines: SnapshotStateList<String>) {
-        Spacer(Modifier.height(6.dp))
-        Text("Log", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
-        Box(Modifier.fillMaxWidth().height(140.dp).verticalScroll(rememberScrollState())) {
-            Text(lines.joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+    @Composable fun LogTab(lines: SnapshotStateList<String>) {
+        Column {
+            Row { TextButton(onClick = { lines.clear() }) { Text("Clear log") } }
+            Text(lines.joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         }
+    }
+    // Populate a recovered-password field from an unlock result (8-hex key, or 0 when unprotected).
+    private fun applyFound(field: MutableState<String>, res: String) {
+        if (res.length == 8 && res.all { it.isDigit() || it in 'A'..'F' }) field.value = res
+        else if (res == "no password") field.value = "00000000"
     }
 }
