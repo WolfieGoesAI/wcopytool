@@ -57,7 +57,7 @@ class UsbReader(private val mgr: UsbManager) {
         return Proto.parse(r)
     }
     private fun sendSeq(items: List<IntArray>, log: (String) -> Unit) {
-        for (p in items) { transact(p, 400); Thread.sleep(20) }
+        for (p in items) { transact(p, 400); Thread.sleep(90) }   // settle time for the T5577 to commit each write
     }
 
     // ---- key-variant expansion ----
@@ -151,32 +151,40 @@ class UsbReader(private val mgr: UsbManager) {
         val orig = readEMId(freq) ?: run { log("no card"); return "no card" }
         val marker = orig xor 1
         val (mw1, mw2) = Proto.em4100Words(marker)
-        // precheck: already unprotected?
+        val z = intArrayOf(0, 0, 0, 0)
+        // Precheck "truly unprotected" with a NO-PASSWORD (op12) marker write — this succeeds only when
+        // the PWD bit is actually clear, so it isn't fooled by a protected-with-password-0 state.
         transact(Proto.lfRFConfig(freq))
-        transact(Proto.lfT5Write(1, Proto.u32be(mw1), intArrayOf(0,0,0,0), freq))
-        transact(Proto.lfT5Write(2, Proto.u32be(mw2), intArrayOf(0,0,0,0), freq))
-        Thread.sleep(120)
+        transact(Proto.lfT5WriteNoPwd(1, Proto.u32be(mw1), freq))
+        transact(Proto.lfT5WriteNoPwd(2, Proto.u32be(mw2), freq))
+        Thread.sleep(150)
         if (readEMId(freq) == marker) { restoreT5(orig, freq); log("card has no password (not protected)"); return "no password" }
         for ((i, k) in keys.withIndex()) {
-            transact(Proto.lfT5Write(7, intArrayOf(0,0,0,0), k, freq))
-            transact(Proto.lfT5Write(1, Proto.u32be(mw1), intArrayOf(0,0,0,0), freq))
-            transact(Proto.lfT5Write(2, Proto.u32be(mw2), intArrayOf(0,0,0,0), freq))
-            Thread.sleep(120)
+            // Clear block 7 with the candidate, then write the marker with password 0 — only the real
+            // password lets block 7 clear, so only then does the pwd-0 marker write take.
+            transact(Proto.lfT5Write(7, z, k, freq))
+            transact(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
+            transact(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
+            Thread.sleep(150)
             if (readEMId(freq) == marker) { restoreT5(orig, freq); val ks = Proto.hexJoin(k); log("password is $ks"); return ks }
             if (i % 8 == 7) log("…tried ${i + 1}/${keys.size}")
         }
         log("not found in ${keys.size} keys"); return "not found"
     }
     private fun restoreT5(id: Long, freq: Long) {
-        // Block 7 was just cleared to 0, but the PWD bit in block 0 is still set — so the restore must
-        // authenticate with password 0 (op13), not op12 (no-pwd, which a protected card rejects). The
-        // block-0 write (00148040) then clears the PWD bit, leaving the card truly unprotected.
+        // Leave the card TRULY unprotected. At this point block 7 is 0 but the PWD bit in block 0 is
+        // still set, so a no-pwd (op12) write is rejected — we must authenticate with password 0 (op13)
+        // to clear the PWD bit, then op12 to reassert now that it's open. Belt-and-suspenders so a
+        // re-unlock correctly sees "no password".
         val (w1, w2) = Proto.em4100Words(id)
         val z = intArrayOf(0, 0, 0, 0)
+        val open = Proto.u32be(0x00148040L)
         sendSeq(listOf(
-            Proto.lfT5Write(1, Proto.u32be(w1), z, freq),
-            Proto.lfT5Write(2, Proto.u32be(w2), z, freq),
-            Proto.lfT5Write(0, Proto.u32be(0x00148040L), z, freq),
+            Proto.lfT5Write(7, z, z, freq),                  // ensure password block = 0
+            Proto.lfT5Write(0, open, z, freq),               // clear PWD bit (op13 pwd 0)
+            Proto.lfT5WriteNoPwd(0, open, freq),             // reassert config (op12, now open)
+            Proto.lfT5Write(1, Proto.u32be(w1), z, freq),  Proto.lfT5WriteNoPwd(1, Proto.u32be(w1), freq),
+            Proto.lfT5Write(2, Proto.u32be(w2), z, freq),  Proto.lfT5WriteNoPwd(2, Proto.u32be(w2), freq),
             Proto.lfModeCmd(0x05, freq)
         )) {}
     }
