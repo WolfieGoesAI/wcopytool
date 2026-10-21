@@ -56,17 +56,16 @@ class UsbReader(private val mgr: UsbManager) {
         val r = recv(timeoutMs) ?: return null
         return Proto.parse(r)
     }
-    // Per-write settle. The T5577 needs time to burn each block before the next command or a readback;
-    // the Mac app leaves ~250-280 ms between writes and is reliable. Tunable at runtime for experimenting.
-    var settleMs: Long = 250L
-    // When true, the sweep's probe writes are sent once instead of twice (faster, slightly riskier).
-    var fastSweep: Boolean = false
+    // Per-write settle: the T5577 needs time to burn each block before the next command or a readback.
+    // Tunable at runtime from the UI so the minimum safe value can be found; 180 ms is the current baseline.
+    var settleMs: Long = 180L
     private fun wset() = Thread.sleep(settleMs)
     // A write that must commit: issue it, settle, and (on this flaky link) send it a second time so a
-    // dropped first attempt still lands, then settle again.
+    // dropped first attempt still lands, then settle again. Used for the critical restore/unprotect step.
     private fun writeCommit(payload: IntArray) { transact(payload, 500); wset(); transact(payload, 500); wset() }
-    // A sweep probe write: single send when fastSweep is on, otherwise the belt-and-suspenders double send.
-    private fun sweepWrite(payload: IntArray) { transact(payload, 500); wset(); if (!fastSweep) { transact(payload, 500); wset() } }
+    // A sweep probe write: single send (fast). Reliability for the sweep comes from the 0x14/0x05 mode
+    // bracketing and the settle, not from double-sending.
+    private fun sweepWrite(payload: IntArray) { transact(payload, 500); wset() }
     private fun sendSeq(items: List<IntArray>, log: (String) -> Unit) {
         for (p in items) { transact(p, 500); wset() }
     }

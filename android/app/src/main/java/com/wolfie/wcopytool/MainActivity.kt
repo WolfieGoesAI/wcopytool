@@ -187,7 +187,7 @@ class MainActivity : ComponentActivity() {
             }
             RevRow("Unlock also try:", bitRev, byteRev)
             Spacer(Modifier.height(6.dp))
-            TuningRow()
+            SettleRow()
         }
     }
 
@@ -275,17 +275,19 @@ class MainActivity : ComponentActivity() {
     }
     @Composable fun CheckRow(label: String, s: MutableState<Boolean>) =
         Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(s.value, { s.value = it }); Text(label, fontSize = 12.sp) }
-    // Temporary tuning controls for finding the speed/reliability limits. They set reader fields directly.
-    @Composable fun TuningRow() {
-        val fast = remember { mutableStateOf(reader.fastSweep) }
-        val shortSettle = remember { mutableStateOf(reader.settleMs <= 180L) }
-        Text("Tuning (experimental)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    // Per-write settle time (ms), editable so the minimum safe value can be found on real hardware.
+    @Composable fun SettleRow() {
+        val s = remember { mutableStateOf(reader.settleMs.toString()) }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(fast.value, { fast.value = it; reader.fastSweep = it }); Text("Fast sweep (single send)", fontSize = 12.sp)
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(shortSettle.value, { shortSettle.value = it; reader.settleMs = if (it) 180L else 250L })
-            Text("Short settle (180 ms, else 250)", fontSize = 12.sp)
+            Text("Settle (ms):", fontSize = 12.sp); Spacer(Modifier.width(6.dp))
+            OutlinedTextField(
+                value = s.value,
+                onValueChange = { v -> val d = v.filter { it.isDigit() }.take(4); s.value = d; d.toLongOrNull()?.let { reader.settleMs = it } },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
+                modifier = Modifier.width(96.dp)
+            )
         }
     }
     @Composable fun RevRow(label: String, bitRev: MutableState<Boolean>, byteRev: MutableState<Boolean>) =
