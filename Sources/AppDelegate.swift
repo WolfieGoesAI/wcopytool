@@ -372,7 +372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let protRow = hstack([hidProtect, field(hidPwd, 100),
                               labeled("Current card password:", field(hidUnlock, 100))])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
-        let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). Current card password: the password already on the card — needed to re-write or unprotect a card you previously locked (leave 00000000 for a blank card); it is remembered automatically after a protected write. Unlock HID removes write-protection on a locked card by rewriting it as a blank, unprotected plain EM4100 T5577 (config 00148040): it authenticates with the known keys to clear the password, then writes a blank EM4100 and the open config — matching the reference program's \u{201C}unlock as plain T5577 (EM4nnn)\u{201D}. The card is no longer HID afterwards; re-write it as HID if needed. AWID, FDX-B and Paradox follow once captured.")
+        let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). Current card password: the password already on the card — needed to re-write or unprotect a card you previously locked (leave 00000000 for a blank card); it is remembered automatically after a protected write. Unlock HID removes write-protection on a locked card by rewriting it as an unprotected plain EM4100 T5577 (config 00148040): it authenticates with the known keys to clear the password, then writes a valid EM4100 (the 125 kHz tab's id, or 1) and the open config. Writing a real (non-blank) id leaves the card in a state that accepts a direct HID re-write — a blank id 0 does not. The card is a plain EM4100 afterwards; re-write it as HID if needed. AWID, FDX-B and Paradox follow once captured.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         hidRefresh()
         return vstack([head("HID Prox"), row, protRow, hidInfo, note])
@@ -476,16 +476,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let freq = parseU32(idFreq.stringValue)
         let cands = hidUnlockKeys()
         let zero: [UInt8] = [0,0,0,0]
-        log("Unlock HID → plain T5577/EM4100: clearing password (sweep \(cands.count) key(s)) and rewriting block0 = 00148040 (unprotected)…")
+        // Rewrite as a VALID, non-blank EM4100. A blank (ID 0) card leaves the chip in a state the
+        // next HID write won't latch onto — a real EM write is what makes a direct HID re-write work —
+        // so we lay down a real EM id: the 125 kHz tab's id, or 1 if that is 0/blank.
+        let emId = currentCardId() == 0 ? UInt64(1) : currentCardId()
+        let (w1, w2) = em4100Words(emId)
+        let em1 = u32be(w1), em2 = u32be(w2)
+        let em0: [UInt8] = [0x00,0x14,0x80,0x40]            // EM config, PWD bit (0x10) cleared
+        log(String(format: "Unlock HID → plain T5577/EM4100: clearing password (sweep %d key(s)) and rewriting as EM4100 id %010llX, config 00148040 (unprotected)…", cands.count, emId))
         var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config")]
         // 1) Force block 7 (password) to 0, authenticating with every candidate current-password.
         for c in cands { seq.append((lfT5Write(addr: 7, word: zero, pwd: c, freq: freq), "block7 = 0 (auth \(hexJoin(c)))")) }
-        // 2) Rewrite as a blank EM4100 card (bytes verified from the reference capture) with the
-        //    unprotected EM config. op12 (no-pwd) then op13 (pwd 0) for each block, as the app does.
-        let em1: [UInt8] = [0xFF,0x80,0x00,0x00]            // EM4100 id 0: 9 header ones, then zeros
-        let em0: [UInt8] = [0x00,0x14,0x80,0x40]            // EM config, PWD bit (0x10) cleared
+        // 2) Write the EM4100 data + unprotected config. op12 (no-pwd) then op13 (pwd 0) per block.
         let blocks: [(UInt8,[UInt8],String)] = [
-            (1, em1, "block1 = FF800000"), (2, zero, "block2 = 0"), (0, em0, "block0 = 00148040")]
+            (1, em1, "block1 = \(hexJoin(em1))"), (2, em2, "block2 = \(hexJoin(em2))"),
+            (0, em0, "block0 = 00148040")]
         for (blk, d, name) in blocks {
             seq.append((lfT5WriteNoPwd(addr: blk, word: d, freq: freq), "\(name) op12"))
             seq.append((lfT5Write(addr: blk, word: d, pwd: zero, freq: freq), "\(name) op13"))
@@ -498,7 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             self.hidProtect.state = .off
             self.hidPwd.stringValue = "00000000"
             self.hidUnlock.stringValue = "00000000"
-            self.log("✓ Unlock HID done: password removed; card rewritten as an unprotected blank EM4100 T5577 (ID 0, config 00148040). Readers may not latch a blank ID — re-write it as HID or EM and it will work.")
+            self.log(String(format: "✓ Unlock HID done: password removed; card is now an unprotected plain EM4100 (id %010llX, config 00148040). You can re-write it directly as HID or EM.", emId))
         }
     }
 
