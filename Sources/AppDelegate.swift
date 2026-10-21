@@ -338,19 +338,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func unbrickT5() {
         let f = parseU32(idFreq.stringValue)
         let cfg = u32be(kT5UnbrickConfig)
-        let pwd = currentPwd()                       // try the entered password too, in case block 0 needs auth
-        log(String(format: "Unbrick T5577: writing block0 = %08X in test mode, sweeping downlink modes…", kT5UnbrickConfig))
+        log(String(format: "Unbrick T5577: rewriting block0 = %08X (safe default) — password-mode sweep (mirrors the working Proxmark script)…", kT5UnbrickConfig))
+        // Candidate passwords: the script's four, plus whatever is typed in the Password field.
+        // Try each in normal AND reversed byte order (T5577 password byte order is finicky).
+        var pwds: [[UInt8]] = []
+        func addPwd(_ b: [UInt8]) {
+            for v in [pad4(b), rev4(b)] where !pwds.contains(where: { $0 == v }) { pwds.append(v) }
+        }
+        for h in kT5UnbrickPwds { addPwd(keyBytes(h)) }
+        let typed = currentPwd(); if typed != [0,0,0,0] { addPwd(typed) }
         var seq: [([UInt8], String)] = []
-        // mode byte: 0x00 = default/test, 0x01..0x03 emulate Proxmark downlink r1..r3. High bit as a
-        // test-mode guess. pwd=0 first (true test mode needs none), then the entered password.
-        for (name, mode) in [("test", UInt8(0x00)), ("r1", 0x01), ("r2", 0x02), ("r3", 0x03), ("test|hi", 0x80)] {
-            seq.append((lfT5WriteMode(addr: 0, word: cfg, pwd: [0,0,0,0], freq: f, mode: mode), "blk0 \(name) pwd0"))
+        // Password-mode block-0 writes (op 0x13, mode 0x00) — the part of the script that revives a
+        // real/newer card. A write with the wrong password is ignored by the chip (harmless).
+        for p in pwds {
+            seq.append((lfT5WriteMode(addr: 0, word: cfg, pwd: p, freq: f, mode: 0x00), "blk0 pwd \(hex(p))"))
         }
-        if pwd != [0,0,0,0] {
-            seq.append((lfT5WriteMode(addr: 0, word: cfg, pwd: pwd, freq: f, mode: 0x00), "blk0 test pwd=\(hex(pwd))"))
-        }
+        // Then a bare test-mode-style write (no password) for an unprotected card, and a read.
+        seq.append((lfT5WriteMode(addr: 0, word: cfg, pwd: [0,0,0,0], freq: f, mode: 0x00), "blk0 pwd0"))
         seq.append((lfRead(freq: f), "read after unbrick"))
-        sendSeq(seq, gap: 0.45)
+        log("  passwords tried: \(pwds.map { hex($0) }.joined(separator: " "))")
+        sendSeq(seq, gap: 0.5)
     }
 
     // Modal yes/no confirmation. Returns true if the user approves (always true in a headless run).
@@ -373,11 +380,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // EM4100 data write to a chip (T5577 op 0x13 / EM4305 op 0x12): data to addr 1,2,
     // config to addr 0, then read back to verify. Uses the Password field for protected cards.
     func currentPwd() -> [UInt8] { keyBytes(lfPwd.stringValue) }
+    // Set when a write is in flight: the id we wrote and the chip, so the verify read can confirm
+    // the chip actually accepted the write (vs. the device acking while a protected chip ignores it).
+    var writeExpectId: UInt64? = nil
+    var writeExpectEM = false
     func writeEM(_ em4305: Bool) {
         let id = parseU40(lfWriteId.stringValue)
         let (w1, w2) = em4100Words(id)
         let freq = parseU32(idFreq.stringValue)
         let pwd = currentPwd()
+        writeExpectId = id; writeExpectEM = em4305      // armed; the verify read checks it
         if em4305 {
             // Native EM4305: login (with password), word5/6 = data, word4 = config, verify.
             log(String(format: "EM4305 write id=%010llX  w1=%08X w2=%08X pwd=%@", id, w1, w2, hex(pwd)))
@@ -682,6 +694,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
         if recPhase != .idle { handleRecovery(bytes) }
         else if unlockActive { handleUnlock(bytes) }
+        else if let want = writeExpectId, let id = recEMid(bytes) {   // verify a write actually took
+            writeExpectId = nil
+            if id == want {
+                log(String(format: "✓ write verified: card now reads %010llX.", id))
+            } else {
+                log(String(format: "✗ write did NOT take: card still reads %010llX (wanted %010llX).", id, want))
+                log("  The device ACKs (02 07 00) but the chip ignored the write → this card is password-protected. Enter its write password in the Password field and write again, or run \u{201C}Unbrick T5577\u{201D} (tries Tian/19920427/Wolf/0). The write password cannot be found by reading.")
+            }
+        }
         else if let id = recEMid(bytes) { lfWriteId.stringValue = String(id) }  // Read ID → Card #
     }
 

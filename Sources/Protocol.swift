@@ -199,7 +199,7 @@ let kLFKeyDict: [String] = [
     "00000000","51243648","000D8787","19920427","002BCFCF","50524F58","F9DCEBA0","65857569",
     "89A69E60","314159E0","7B3D5C48","AA55BBBB","A5B4C3D2","1C0B5848","00434343","50415353",
     "444E4752","4E457854","44B44CAE","88661858","E9920427","575F4F4B","50520901","20206666",
-    "5469616E","C0F5009A","07CEE75D","FEEDBEEF","DEADC0DE","A9EF2AFC","11111111","22222222",
+    "5469616E","576F6C66","C0F5009A","07CEE75D","FEEDBEEF","DEADC0DE","A9EF2AFC","11111111","22222222",
     "33333333","55555555","66666666","77777777","99999999","BBBBBBBB","FFFFFFFF","A0A1A2A3",
     "B0B1B2B3","01234567","12345678","0CB7E7FC","FABADA11","AABBCCDD","0C0D0E0F","01020304",
 ]
@@ -248,6 +248,9 @@ func lfT5WriteMode(addr: UInt8, word: [UInt8], pwd: [UInt8], freq: UInt32 = 1250
 // Proxmark T5577 unbrick/reset config written to block 0 in test mode (lf t55 write -b 0 -d 000880E0 -t).
 // A safe, readable default modulation that revives a card whose block 0 got corrupted.
 let kT5UnbrickConfig: UInt32 = 0x000880E0
+// Passwords the working Proxmark unbrick script writes block 0 with, in password mode (-p):
+// "Tian", a date key, zero, and "Wolf". One of these is the card's write password.
+let kT5UnbrickPwds: [String] = ["5469616E", "19920427", "00000000", "576F6C66"]
 //   EM4305 login (op 0x21) with a given password.
 func em4305LoginBytes(pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
     [0xFF,0x00,0x66,0x00,0x1E] + u32le(freq) + [0x21] + pad4(pwd)
