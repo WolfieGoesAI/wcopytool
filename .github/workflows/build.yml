@@ -6,6 +6,9 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch:
 
+permissions:
+  contents: write                # allow the rolling-release publish below
+
 jobs:
   macos:
     runs-on: macos-14            # Apple Silicon runner
@@ -47,6 +50,17 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          files: |
+            dist/wCopyTool-universal.zip
+            dist/wCopyTool-mojave-x86_64.zip
+
+      - name: Publish rolling 'latest' release (on main)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          body: Auto-built from the latest commit on main. Download a .zip below.
           files: |
             dist/wCopyTool-universal.zip
             dist/wCopyTool-mojave-x86_64.zip
