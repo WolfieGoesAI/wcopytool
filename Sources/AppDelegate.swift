@@ -362,6 +362,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var recAwaitVerify = false // waiting for the verify read's reply
     var recVerifyRetries = 0
     var recReadRetries = 0
+    var recConfirming = false  // second read to confirm a marker hit (guards read noise)
+
+    // Compare two EM ids ignoring the low byte (some cards flicker the LSB between reads).
+    func sameIgnoreLSB(_ a: UInt64, _ b: UInt64) -> Bool { (a & 0xFF_FFFF_FF00) == (b & 0xFF_FFFF_FF00) }
 
     func findPwd(_ em4305: Bool) {
         guard recPhase == .idle, !unlockActive else { log("busy — another operation is running"); return }
@@ -389,7 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             seq.append((lfT5Write(addr: 2, word: u32be(w2), pwd: key, freq: recFreq), "blk2"))
         }
         recPendingWrites = seq.count
-        recAwaitVerify = false
+        recAwaitVerify = false; recConfirming = false
         sendSeq(seq, gap: 0.12)
     }
     func tryRecCandidate() {
@@ -426,7 +430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         case .readOrig:
             if let id = emid {
                 recOrig = id
-                recMarker = (id ^ 0x01) == id ? (id ^ 0x100) : (id ^ 0x01)
+                recMarker = id ^ 0x00_FFFF_00   // flip two middle bytes (robust to LSB read noise)
                 recIdx = 0; recPhase = .verify
                 log(String(format: "current id=%010llX marker=%010llX — sweeping %d candidates", recOrig, recMarker, recCands.count))
                 tryRecCandidate()
@@ -449,14 +453,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             }
             if recAwaitVerify {
                 if let id = emid {
-                    recAwaitVerify = false
-                    if id == recMarker { recFound() }
-                    else { recIdx += 1; tryRecCandidate() }
-                } else if recVerifyRetries < 3 {  // no-card read → retry a few times
+                    if sameIgnoreLSB(id, recMarker) {
+                        if recConfirming {                 // confirmed twice → real hit
+                            recAwaitVerify = false; recConfirming = false; recFound()
+                        } else {                            // first hit → read again to confirm
+                            recConfirming = true
+                            sendPayload(lfRead(freq: recFreq), "confirm")
+                        }
+                    } else {                                // not the marker → wrong key
+                        recAwaitVerify = false; recConfirming = false
+                        recIdx += 1; tryRecCandidate()
+                    }
+                } else if recVerifyRetries < 3 {            // no-card read → retry a few times
                     recVerifyRetries += 1
                     sendPayload(lfRead(freq: recFreq), "verify retry")
                 } else {
-                    recAwaitVerify = false; recIdx += 1; tryRecCandidate()
+                    recAwaitVerify = false; recConfirming = false
+                    recIdx += 1; tryRecCandidate()
                 }
             }
         case .idle:
