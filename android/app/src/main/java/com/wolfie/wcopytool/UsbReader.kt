@@ -168,11 +168,15 @@ class UsbReader(private val mgr: UsbManager) {
         log("not found in ${keys.size} keys"); return "not found"
     }
     private fun restoreT5(id: Long, freq: Long) {
+        // Block 7 was just cleared to 0, but the PWD bit in block 0 is still set — so the restore must
+        // authenticate with password 0 (op13), not op12 (no-pwd, which a protected card rejects). The
+        // block-0 write (00148040) then clears the PWD bit, leaving the card truly unprotected.
         val (w1, w2) = Proto.em4100Words(id)
+        val z = intArrayOf(0, 0, 0, 0)
         sendSeq(listOf(
-            Proto.lfT5WriteNoPwd(1, Proto.u32be(w1), freq),
-            Proto.lfT5WriteNoPwd(2, Proto.u32be(w2), freq),
-            Proto.lfT5WriteNoPwd(0, Proto.u32be(0x00148040L), freq),
+            Proto.lfT5Write(1, Proto.u32be(w1), z, freq),
+            Proto.lfT5Write(2, Proto.u32be(w2), z, freq),
+            Proto.lfT5Write(0, Proto.u32be(0x00148040L), z, freq),
             Proto.lfModeCmd(0x05, freq)
         )) {}
     }
