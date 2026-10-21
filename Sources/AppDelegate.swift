@@ -1056,10 +1056,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             edScroll.widthAnchor.constraint(equalToConstant: 180), edScroll.heightAnchor.constraint(equalToConstant: 360),
             mirScroll.widthAnchor.constraint(equalToConstant: 560), mirScroll.heightAnchor.constraint(equalToConstant: 360),
         ])
-        let note = NSTextField(wrappingLabelWithString: "One hex password (8 hex digits) per line. These are the keys Unlock tries and the current-password candidates; the two Unlock Password fields and the Write Lock Password are also tried automatically. The right columns show each key's bit-reversed (binary-mirror) and byte-reversed equivalents — T5577 and EM4305 passwords are sometimes mirrors of each other — plus its ASCII text (e.g. 5469616E → \u{201C}Tian\u{201D}, 576F6C66 → \u{201C}Wolf\u{201D}; non-printable bytes shown as ·).")
-        note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         refreshMirror()
-        return vstack([head("Known passwords (editable)"), hstack([apply, reset]), cols, note])
+        return vstack([hstack([apply, reset]), cols])
     }
     func applyKeyList() {
         var out: [String] = []; var seen = Set<String>()
