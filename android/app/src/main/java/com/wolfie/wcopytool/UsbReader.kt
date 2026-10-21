@@ -152,6 +152,7 @@ class UsbReader(private val mgr: UsbManager) {
         val marker = orig xor 1
         val (mw1, mw2) = Proto.em4100Words(marker)
         val z = intArrayOf(0, 0, 0, 0)
+        log("unlock: baseline id=%010X  probe-marker=%010X".format(orig, marker))
         // Precheck "already unprotected": write the marker authenticating with password 0 (op13). On
         // this device op13 is what commits a write, and it is accepted only when the card is open (or its
         // password is 0) — so a readback of the marker means unprotected. (A no-pwd op12 write alone does
@@ -159,8 +160,10 @@ class UsbReader(private val mgr: UsbManager) {
         transact(Proto.lfRFConfig(freq))
         transact(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
         transact(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
-        Thread.sleep(150)
-        if (readEMId(freq) == marker) { log("precheck: card is unprotected"); restoreT5(orig, z, freq, log); log("card has no password (not protected)"); return "no password" }
+        Thread.sleep(200)
+        val pre = readEMId(freq)
+        log("precheck readback=%010X".format(pre ?: -1L))
+        if (pre == marker) { log("precheck: card is unprotected"); restoreT5(orig, z, freq, log); log("card has no password (not protected)"); return "no password" }
         log("precheck: protected — sweeping ${keys.size} key(s)")
         for ((i, k) in keys.withIndex()) {
             // Clear block 7 with the candidate, then write the marker with password 0 — only the real
@@ -168,8 +171,10 @@ class UsbReader(private val mgr: UsbManager) {
             transact(Proto.lfT5Write(7, z, k, freq))
             transact(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
             transact(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
-            Thread.sleep(150)
-            if (readEMId(freq) == marker) { val ks = Proto.hexJoin(k); log("password is $ks — clearing protection"); restoreT5(orig, k, freq, log); return ks }
+            Thread.sleep(200)
+            val rb = readEMId(freq)
+            if (i < 4) log("key ${Proto.hexJoin(k)} -> readback=%010X".format(rb ?: -1L))
+            if (rb == marker) { val ks = Proto.hexJoin(k); log("password is $ks — clearing protection"); restoreT5(orig, k, freq, log); return ks }
             if (i % 8 == 7) log("…tried ${i + 1}/${keys.size}")
         }
         log("not found in ${keys.size} keys"); return "not found"
