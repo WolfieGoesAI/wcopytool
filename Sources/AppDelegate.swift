@@ -30,7 +30,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     // shared top/bottom
     let statusField = NSTextField(labelWithString: "Not connected")
-    let prependToggle = NSButton(checkboxWithTitle: "Prepend report-ID byte", target: nil, action: nil)
     let fStatus = NSTextField(labelWithString: "—"); let fLen = NSTextField(labelWithString: "—")
     let fUID = NSTextField(labelWithString: "—")
     let fPayload = NSTextField(labelWithString: "—"); let fAscii = NSTextField(labelWithString: "—")
@@ -46,12 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let ntagPage = NSTextField(string: "4")
     let ntagData = NSTextField(string: "00000000")
     let idFreq = NSTextField(string: "125000")
-    let lfMode = NSTextField(string: "05")
-    let lfTail = NSTextField(string: "00 00 00 00")
     let lfWriteId = NSTextField(string: "1234567890")
     let lfConfig = NSTextField(string: "00148050")
-    let lfBlk = NSTextField(string: "1")
-    let lfWord = NSTextField(string: "00000000")
     let lfPwd = NSTextField(string: "00000000")
     let lfT5Found = NSTextField(string: "00000000")   // editable: found or user-entered password
     let lfEMFound = NSTextField(string: "00000000")
@@ -96,7 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
         statusField.textColor = .systemRed
         let rescan = ActionButton("Rescan") { [weak self] in self?.rescan() }
-        let topBar = hstack([statusField, NSView(), prependToggle, rescan])
+        let topBar = hstack([statusField, NSView(), rescan])
         topBar.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(topBar)
 
@@ -261,36 +256,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let dev = hstack([
             ActionButton("Device info (0x68)") { [weak self] in self?.sendPayload([0xFF,0x00,0x68], "device info") },
             ActionButton("Serial number (0x69)") { [weak self] in self?.sendPayload([0xFF,0x00,0x69], "serial") },
-            ActionButton("Init / Reset reader") { [weak self] in self?.resetReader() },
-            ActionButton("Revive LF (rewrite)") { [weak self] in self?.reviveT5() },
         ])
         // Confirmed LF read: FF 00 65 05 1E <freq> 00 00 00 00 → reply 02 0C 01 00 05 <5-byte EM id> CHK FD
-        let readRow = hstack([labeled("Freq (Hz):", field(idFreq, 90)),
-                              ActionButton("Read ID (EM4100)") { [weak self] in
+        // Frequency is fixed at 125 kHz — every LF command in the original app uses it, and EM4100 /
+        // T5577 are 125 kHz chips. (idFreq stays at 125000 internally.)
+        let readRow = hstack([ActionButton("Read ID (EM4100)") { [weak self] in
                                   guard let s = self else { return }
                                   s.sendPayload(lfRead(freq: parseU32(s.idFreq.stringValue)), "LF read EM4100") }])
-        let freqs = hstack([NSTextField(labelWithString: "Freqs:"),
-                            ActionButton("125k") { [weak self] in self?.setFreq(125000) },
-                            ActionButton("175k") { [weak self] in self?.setFreq(175000) },
-                            ActionButton("250k") { [weak self] in self?.setFreq(250000) },
-                            ActionButton("300k") { [weak self] in self?.setFreq(300000) },
-                            ActionButton("375k") { [weak self] in self?.setFreq(375000) },
-                            ActionButton("500k") { [weak self] in self?.setFreq(500000) }])
-        // 0x65 experimenter — for discovering the T5577 write mode (watch the reply).
-        let exp = hstack([labeled("0x65 mode:", field(lfMode, 50)),
-                          labeled("tail hex:", field(lfTail, 180)),
-                          ActionButton("Send 0x65") { [weak self] in
-                              guard let s = self else { return }
-                              var tail = parseHexBlob(s.lfTail.stringValue)
-                              if tail.isEmpty { tail = [0,0,0,0] }
-                              s.sendPayload(lf65(mode: parseByte(s.lfMode.stringValue), freq: parseU32(s.idFreq.stringValue), tail: tail), "LF 0x65 experiment") }])
-        // Write — EM4100, explicit per chip. Writes data+config (with the Password field) then verifies.
+        // Write — rewrites all LF chip types (T5577 + EM4305) the way the original app does.
         let writeRow = hstack([labeled("Card #:", field(lfWriteId, 130)),
                                labeled("Config:", field(lfConfig, 90)),
                                ActionButton("Write T5577") { [weak self] in self?.writeEM(false) },
                                ActionButton("Write EM4305") { [weak self] in self?.writeEM(true) },
                                ActionButton("Write all LF") { [weak self] in guard let s = self else { return }
-                                   s.writeLFAll(id: parseU40(s.lfWriteId.stringValue)) }])
+                                   s.writeLFAll(id: parseU40(s.lfWriteId.stringValue)) },
+                               ActionButton("Revive") { [weak self] in self?.reviveT5() }])
         let pwdRow = hstack([labeled("Password:", field(lfPwd, 100)),
                              ActionButton("Find T5577 pwd (read)") { [weak self] in self?.findPwd(false) },
                              ActionButton("Find EM4305 pwd (read)") { [weak self] in self?.findPwd(true) }])
@@ -300,43 +280,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ActionButton("Unlock T5577") { [weak self] in self?.unlockCard(false) },
             labeled("EM4305 pwd:", field(lfEMFound, 100)),
             ActionButton("Unlock EM4305") { [weak self] in self?.unlockCard(true) }])
-        let blkRow = hstack([labeled("Addr:", field(lfBlk, 40)),
-                             labeled("Word (hex):", field(lfWord, 100)),
-                             ActionButton("Write T5577 word") { [weak self] in self?.writeBlockManual(false) },
-                             ActionButton("Write EM4305 word") { [weak self] in self?.writeBlockManual(true) }])
-        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write / Write all LF / Revive replicate the original app exactly: config 00148050, password set to \u{201C}Tian\u{201D}, each block written op12 (no pwd) then op13 (pwd), with the password first normalised via known keys — this is what makes cards the reader detects, and what revives a silent card. \u{201C}Find pwd (read)\u{201D} is read-only and never writes. This reader has no test mode (verified in the binary), so a card whose password is in no known set can only be revived by a Proxmark.")
+        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write / Write all LF / Revive replicate the original app exactly: config 00148050, password set to \u{201C}Tian\u{201D}, each block written op12 (no pwd) then op13 (pwd), with the password first normalised via known keys — this is what makes cards the reader detects, and what revives a silent card. Leave the Password field empty for the default \u{201C}Tian\u{201D}, or type one to set your own. \u{201C}Find pwd (read)\u{201D} is read-only and never writes. Unlock clears the password (config 00148040).")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
-        let note = NSTextField(wrappingLabelWithString: "Read ID uses FF 00 65 05 1E <freq> 00 00 00 00 → 5-byte EM4100 id. 0x68 = model/firmware, 0x69 = serial. 0x65 experimenter is for probing other LF modes.")
-        note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), dev, readRow, freqs, writeRow, pwdRow, foundRow, blkRow, exp, warn, note])
-    }
-    func setFreq(_ f: UInt32) { idFreq.stringValue = String(f) }
-
-    // Re-init the reader to a known LF state (clears a front-end mode left by EM4305/write ops).
-    // Replays the app's control/init commands + the RF-config (op 0x1F) used by the firmware.
-    func resetReader() {
-        let f = parseU32(idFreq.stringValue)
-        // RF config: FF 00 66 00 1E <freq> 1F 18 01 EF 00 9B 00 86 01  (params from the firmware)
-        let rfcfg: [UInt8] = [0xFF,0x00,0x66,0x00,0x1E] + u32le(f) + [0x1F, 0x18,0x01, 0xEF,0x00, 0x9B,0x00, 0x86,0x01]
-        log("Reset reader: init handshake + control + RF config…")
-        sendSeq([
-            ([0xFF,0x00,0x9A,0x5A,0xA5,0x54,0x69,0x61,0x6E], "init handshake"),
-            ([0xFF,0x00,0x68], "ctrl 0x68"),
-            ([0xFF,0x00,0x69], "ctrl 0x69"),
-            ([0xFF,0x00,0x6A,0x01], "toggle 0x6A"),
-            ([0xFF,0x00,0x6B,0x31], "slot 0x6B 31"),
-            ([0xFF,0x00,0x6B,0x30], "slot 0x6B 30"),
-            (rfcfg, "RF config 0x1F"),
-            (lfRead(freq: f), "read"),
-        ], gap: 0.3)
-    }
-
-    // Modal yes/no confirmation. Returns true if the user approves (always true in a headless run).
-    func confirm(_ title: String, _ info: String, ok: String = "Proceed") -> Bool {
-        let a = NSAlert()
-        a.messageText = title; a.informativeText = info; a.alertStyle = .warning
-        a.addButton(withTitle: ok); a.addButton(withTitle: "Cancel")
-        return a.runModal() == .alertFirstButtonReturn
+        return vstack([head("125 kHz ID"), dev, readRow, writeRow, pwdRow, foundRow, warn])
     }
 
     // Send a timed sequence so the reader isn't overrun; replies arrive via the input callback.
@@ -559,19 +505,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             break
         }
     }
-    func writeBlockManual(_ em4305: Bool) {
-        let addr = parseByte(lfBlk.stringValue)
-        let word = UInt32(lfWord.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0
-        let freq = parseU32(idFreq.stringValue)
-        if em4305 {
-            sendPayload(em4305WriteWord(addr: addr, bytes: u32be(word), freq: freq),
-                        String(format: "EM4305 write word %d = %08X", Int(addr), word))
-        } else {
-            sendPayload(lfWriteBlock(block: addr, word: word, freq: freq),
-                        String(format: "T5577 write block %d = %08X", Int(addr), word))
-        }
-    }
-
     // ---- Unlock: read current id, rewrite it with the found/entered password, and reset the
     // password to 0 with protection cleared, leaving the card writable without a password.
     var unlockActive = false
@@ -705,8 +638,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     // MARK: send / receive
     func sendPayload(_ payload: [UInt8], _ label: String) {
-        var frame = Frame.build(payload: payload)
-        if prependToggle.state == .on { frame = [0x00] + frame }
+        let frame = Frame.build(payload: payload)
         log("» \(label)")
         hid.send(frame, reportID: 0)
     }
