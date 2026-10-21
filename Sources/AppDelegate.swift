@@ -357,13 +357,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var recOrig: UInt64 = 0
     var recMarker: UInt64 = 0
     var recFreq: UInt32 = 125000
+    // Reply-tracking so the sweep never stalls when a read comes back as a no-card status (02 07).
+    var recPendingWrites = 0   // write replies still expected in the current batch
+    var recAwaitVerify = false // waiting for the verify read's reply
+    var recVerifyRetries = 0
+    var recReadRetries = 0
 
     func findPwd(_ em4305: Bool) {
-        guard recPhase == .idle else { log("recovery already running"); return }
+        guard recPhase == .idle, !unlockActive else { log("busy — another operation is running"); return }
         recEM = em4305; recFreq = parseU32(idFreq.stringValue)
         (em4305 ? lfEMFound : lfT5Found).stringValue = "searching…"
         recCands = kLFKeyDict.flatMap { k in keyForms(k).map { (k + $0.0, $0.1) } }
-        recIdx = 0; recPhase = .readOrig
+        recIdx = 0; recPhase = .readOrig; recReadRetries = 0
         log("Find \(em4305 ? "EM4305" : "T5577") password: reading current id…")
         sendPayload(lfRead(freq: recFreq), "read current id")
     }
@@ -371,7 +376,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         guard let (p, _, _, _) = Frame.parse(bytes), p.count == 6, p[0] == 0x05 else { return nil }
         return p[1...5].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
     }
-    func recWriteSeq(id: UInt64, key: [UInt8], label: String) -> [([UInt8],String)] {
+    // Send only the write commands for a candidate; the verify read is issued once they're acked.
+    func recSendWrites(id: UInt64, key: [UInt8], label: String) {
         let (w1, w2) = em4100Words(id)
         var seq: [([UInt8],String)] = []
         if recEM {
@@ -382,8 +388,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             seq.append((lfT5Write(addr: 1, word: u32be(w1), pwd: key, freq: recFreq), "blk1 \(label)"))
             seq.append((lfT5Write(addr: 2, word: u32be(w2), pwd: key, freq: recFreq), "blk2"))
         }
-        seq.append((lfRead(freq: recFreq), "verify"))
-        return seq
+        recPendingWrites = seq.count
+        recAwaitVerify = false
+        sendSeq(seq, gap: 0.12)
     }
     func tryRecCandidate() {
         guard recIdx < recCands.count else {
@@ -392,27 +399,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             recPhase = .idle; return
         }
         let (label, key) = recCands[recIdx]
-        sendSeq(recWriteSeq(id: recMarker, key: key, label: label), gap: 0.12)
+        recSendWrites(id: recMarker, key: key, label: label)
+    }
+    func recFound() {
+        let (label, key) = recCands[recIdx]
+        recPhase = .idle
+        (recEM ? lfEMFound : lfT5Found).stringValue = key.map { String(format: "%02X", $0) }.joined()
+        log("✓ PASSWORD FOUND: \(label)  (wire \(hex(key))) — restoring original id")
+        let (w1, w2) = em4100Words(recOrig)
+        var seq: [([UInt8],String)]
+        if recEM {
+            seq = [(em4305LoginBytes(pwd: key, freq: recFreq), "login"),
+                   (em4305WriteWord(addr: 5, bytes: u32be(w1), freq: recFreq), "w5"),
+                   (em4305WriteWord(addr: 6, bytes: u32be(w2), freq: recFreq), "w6"),
+                   (lfRead(freq: recFreq), "read")]
+        } else {
+            seq = [(lfT5Write(addr: 1, word: u32be(w1), pwd: key, freq: recFreq), "blk1"),
+                   (lfT5Write(addr: 2, word: u32be(w2), pwd: key, freq: recFreq), "blk2"),
+                   (lfRead(freq: recFreq), "read")]
+        }
+        sendSeq(seq, gap: 0.12)
     }
     func handleRecovery(_ bytes: [UInt8]) {
-        guard let id = recEMid(bytes) else { return }   // ignore write-status (02 07) replies
+        let emid = recEMid(bytes)
         switch recPhase {
         case .readOrig:
-            recOrig = id
-            recMarker = (id ^ 0x01) == id ? (id ^ 0x100) : (id ^ 0x01)
-            recIdx = 0; recPhase = .verify
-            log(String(format: "current id=%010llX marker=%010llX — sweeping %d candidates", recOrig, recMarker, recCands.count))
-            tryRecCandidate()
-        case .verify:
-            if id == recMarker {
-                let (label, key) = recCands[recIdx]
-                recPhase = .idle
-                (recEM ? lfEMFound : lfT5Found).stringValue = key.map { String(format: "%02X", $0) }.joined()
-                log("✓ PASSWORD FOUND: \(label)  (wire \(hex(key))) — restoring original id")
-                sendSeq(recWriteSeq(id: recOrig, key: key, label: "restore"), gap: 0.12)
-            } else {
-                recIdx += 1
+            if let id = emid {
+                recOrig = id
+                recMarker = (id ^ 0x01) == id ? (id ^ 0x100) : (id ^ 0x01)
+                recIdx = 0; recPhase = .verify
+                log(String(format: "current id=%010llX marker=%010llX — sweeping %d candidates", recOrig, recMarker, recCands.count))
                 tryRecCandidate()
+            } else if recReadRetries < 6 {
+                recReadRetries += 1
+                sendPayload(lfRead(freq: recFreq), "re-read id")
+            } else {
+                log("✗ no card detected to read; aborting")
+                (recEM ? lfEMFound : lfT5Found).stringValue = "no card"
+                recPhase = .idle
+            }
+        case .verify:
+            if recPendingWrites > 0 {            // count write acks (any reply), ignore content
+                recPendingWrites -= 1
+                if recPendingWrites == 0 {       // writes done → issue the verify read
+                    recAwaitVerify = true; recVerifyRetries = 0
+                    sendPayload(lfRead(freq: recFreq), "verify")
+                }
+                return
+            }
+            if recAwaitVerify {
+                if let id = emid {
+                    recAwaitVerify = false
+                    if id == recMarker { recFound() }
+                    else { recIdx += 1; tryRecCandidate() }
+                } else if recVerifyRetries < 3 {  // no-card read → retry a few times
+                    recVerifyRetries += 1
+                    sendPayload(lfRead(freq: recFreq), "verify retry")
+                } else {
+                    recAwaitVerify = false; recIdx += 1; tryRecCandidate()
+                }
             }
         case .idle:
             break
@@ -436,16 +481,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var unlockActive = false
     var unlockEM = false
     var unlockPwd: [UInt8] = []
+    var unlockReadRetries = 0
     func unlockCard(_ em4305: Bool) {
         guard recPhase == .idle, !unlockActive else { log("busy — another operation is running"); return }
         unlockEM = em4305
         unlockPwd = keyBytes((em4305 ? lfEMFound : lfT5Found).stringValue)
-        unlockActive = true
+        unlockActive = true; unlockReadRetries = 0
         log("Unlock \(em4305 ? "EM4305" : "T5577") with pwd \(hex(unlockPwd)): reading id…")
         sendPayload(lfRead(freq: parseU32(idFreq.stringValue)), "read id")
     }
     func handleUnlock(_ bytes: [UInt8]) {
-        guard let id = recEMid(bytes) else { return }
+        guard let id = recEMid(bytes) else {       // no-card read → retry before giving up
+            if unlockReadRetries < 6 {
+                unlockReadRetries += 1
+                sendPayload(lfRead(freq: parseU32(idFreq.stringValue)), "re-read id")
+            } else {
+                unlockActive = false
+                log("✗ unlock: no card detected to read")
+            }
+            return
+        }
         unlockActive = false
         let freq = parseU32(idFreq.stringValue)
         let (w1, w2) = em4100Words(id)
