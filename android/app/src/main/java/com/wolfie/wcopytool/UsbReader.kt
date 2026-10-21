@@ -56,8 +56,15 @@ class UsbReader(private val mgr: UsbManager) {
         val r = recv(timeoutMs) ?: return null
         return Proto.parse(r)
     }
+    // Per-write settle. The T5577 needs time to burn each block before the next command or a readback;
+    // the Mac app leaves ~250-280 ms between writes and is reliable, so match that here.
+    private val WR = 250L
+    private fun wset() = Thread.sleep(WR)
+    // A write that must commit: issue it, settle, and (on this flaky link) send it a second time so a
+    // dropped first attempt still lands, then settle again.
+    private fun writeCommit(payload: IntArray) { transact(payload, 500); wset(); transact(payload, 500); wset() }
     private fun sendSeq(items: List<IntArray>, log: (String) -> Unit) {
-        for (p in items) { transact(p, 400); Thread.sleep(90) }   // settle time for the T5577 to commit each write
+        for (p in items) { transact(p, 500); wset() }
     }
 
     // ---- key-variant expansion ----
@@ -71,8 +78,8 @@ class UsbReader(private val mgr: UsbManager) {
 
     // ---- read ----
     fun readEMId(freq: Long): Long? {
-        transact(Proto.lfRFConfig(freq))
-        for (i in 0 until 8) { Proto.recEMid(transact(Proto.lfRead(freq)))?.let { return it }; Thread.sleep(40) }
+        transact(Proto.lfRFConfig(freq)); Thread.sleep(120)   // let the RF field stabilise before reading
+        for (i in 0 until 10) { Proto.recEMid(transact(Proto.lfRead(freq)))?.let { return it }; Thread.sleep(60) }
         return null
     }
     fun readHID(freq: Long): Proto.HidRead? {
@@ -162,27 +169,26 @@ class UsbReader(private val mgr: UsbManager) {
         // glitches); on a protected card the auth-0 writes stay rejected every pass (block 7 enforces auth),
         // so it never commits and we fall through to the sweep. Only auth-0 writes are used, so a protected
         // card is never accidentally opened.
-        transact(Proto.lfRFConfig(freq))
+        transact(Proto.lfRFConfig(freq)); Thread.sleep(150)
         var opened = false
         for (attempt in 0 until 4) {
-            transact(Proto.lfT5Write(7, z, z, freq))   // warm-up; no-op on an open card, rejected on a protected one
-            transact(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
-            transact(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
-            Thread.sleep(180)
+            writeCommit(Proto.lfT5Write(7, z, z, freq))   // warm-up; no-op on an open card, rejected on a protected one
+            writeCommit(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
+            writeCommit(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
             val r = readEMId(freq)
             if (attempt == 0 || r == marker) log("precheck pass${attempt + 1} readback=%010X".format(r ?: -1L))
             if (r == marker && readEMId(freq) == marker) { opened = true; break }
         }
         if (opened) { log("precheck: card is unprotected"); restoreT5(orig, z, freq, log); log("card has no password (not protected)"); return "no password" }
         log("precheck: protected — sweeping ${keys.size} key(s)")
-        transact(Proto.lfT5Write(7, z, z, freq)); Thread.sleep(80)   // prime so the first key's write isn't the dropped one
+        writeCommit(Proto.lfT5Write(7, z, z, freq))   // prime so the first key's write isn't the dropped one
         for ((i, k) in keys.withIndex()) {
             // Clear block 7 with the candidate, then write the marker with password 0 — only the real
-            // password lets block 7 clear, so only then does the pwd-0 marker write take.
-            transact(Proto.lfT5Write(7, z, k, freq))
-            transact(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
-            transact(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
-            Thread.sleep(200)
+            // password lets block 7 clear, so only then does the pwd-0 marker write take. Each write is
+            // committed twice with full settle so a dropped first attempt still lands.
+            writeCommit(Proto.lfT5Write(7, z, k, freq))
+            writeCommit(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
+            writeCommit(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
             val rb = readEMId(freq)
             if (i < 4) log("key ${Proto.hexJoin(k)} -> readback=%010X".format(rb ?: -1L))
             // Confirm a hit with a second read — this hardware occasionally glitches a readback.
@@ -199,21 +205,20 @@ class UsbReader(private val mgr: UsbManager) {
         val (w1, w2) = Proto.em4100Words(id)
         val z = intArrayOf(0, 0, 0, 0)
         val open = Proto.u32be(0x00148040L)
-        transact(Proto.lfT5Write(7, z, z, freq)); Thread.sleep(150)      // block 7 = 0 (auth 0)
-        transact(Proto.lfT5Write(0, open, z, freq)); Thread.sleep(260)   // block 0 = 00148040 (auth 0) clears PWD bit
-        transact(Proto.lfT5WriteNoPwd(0, open, freq)); Thread.sleep(150) // reassert config (op12)
+        writeCommit(Proto.lfT5Write(7, z, z, freq))      // block 7 = 0 (auth 0)
+        writeCommit(Proto.lfT5Write(0, open, z, freq))   // block 0 = 00148040 (auth 0) clears PWD bit
+        transact(Proto.lfT5WriteNoPwd(0, open, freq)); wset() // reassert config (op12)
         // Verify: a marker write authenticated with password 0 commits only if the card is now open.
         val marker = id xor 1
         val (mk1, mk2) = Proto.em4100Words(marker)
-        transact(Proto.lfT5Write(1, Proto.u32be(mk1), z, freq))
-        transact(Proto.lfT5Write(2, Proto.u32be(mk2), z, freq))
-        Thread.sleep(200)
+        writeCommit(Proto.lfT5Write(1, Proto.u32be(mk1), z, freq))
+        writeCommit(Proto.lfT5Write(2, Proto.u32be(mk2), z, freq))
         val chk = readEMId(freq)
         if (chk == marker) log("restore verify: UNPROTECTED ok (readback=%010X)".format(chk))
         else log("restore verify: STILL PROTECTED (readback=%010X want %010X)".format(chk ?: -1L, marker))
         // Write the real id back (auth 0).
-        transact(Proto.lfT5Write(1, Proto.u32be(w1), z, freq)); transact(Proto.lfT5WriteNoPwd(1, Proto.u32be(w1), freq))
-        transact(Proto.lfT5Write(2, Proto.u32be(w2), z, freq)); transact(Proto.lfT5WriteNoPwd(2, Proto.u32be(w2), freq))
+        writeCommit(Proto.lfT5Write(1, Proto.u32be(w1), z, freq))
+        writeCommit(Proto.lfT5Write(2, Proto.u32be(w2), z, freq))
         transact(Proto.lfModeCmd(0x05, freq)); Thread.sleep(100)
         log("restore: rewrote id=%010X".format(id))
     }
