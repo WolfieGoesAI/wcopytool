@@ -57,12 +57,16 @@ class UsbReader(private val mgr: UsbManager) {
         return Proto.parse(r)
     }
     // Per-write settle. The T5577 needs time to burn each block before the next command or a readback;
-    // the Mac app leaves ~250-280 ms between writes and is reliable, so match that here.
-    private val WR = 250L
-    private fun wset() = Thread.sleep(WR)
+    // the Mac app leaves ~250-280 ms between writes and is reliable. Tunable at runtime for experimenting.
+    var settleMs: Long = 250L
+    // When true, the sweep's probe writes are sent once instead of twice (faster, slightly riskier).
+    var fastSweep: Boolean = false
+    private fun wset() = Thread.sleep(settleMs)
     // A write that must commit: issue it, settle, and (on this flaky link) send it a second time so a
     // dropped first attempt still lands, then settle again.
     private fun writeCommit(payload: IntArray) { transact(payload, 500); wset(); transact(payload, 500); wset() }
+    // A sweep probe write: single send when fastSweep is on, otherwise the belt-and-suspenders double send.
+    private fun sweepWrite(payload: IntArray) { transact(payload, 500); wset(); if (!fastSweep) { transact(payload, 500); wset() } }
     private fun sendSeq(items: List<IntArray>, log: (String) -> Unit) {
         for (p in items) { transact(p, 500); wset() }
     }
@@ -195,9 +199,9 @@ class UsbReader(private val mgr: UsbManager) {
             // password lets block 7 clear, so only then does the pwd-0 marker write take. Each write is
             // committed twice with full settle so a dropped first attempt still lands.
             writeMode(freq)
-            writeCommit(Proto.lfT5Write(7, z, k, freq))
-            writeCommit(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
-            writeCommit(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
+            sweepWrite(Proto.lfT5Write(7, z, k, freq))
+            sweepWrite(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
+            sweepWrite(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
             val rb = readEMId(freq)
             if (i < 4) log("key ${Proto.hexJoin(k)} -> readback=%010X".format(rb ?: -1L))
             // Confirm a hit with a second read — this hardware occasionally glitches a readback.
