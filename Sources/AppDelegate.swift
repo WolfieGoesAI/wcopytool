@@ -372,7 +372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let protRow = hstack([hidProtect, field(hidPwd, 100),
                               labeled("Current card password:", field(hidUnlock, 100))])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
-        let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). Current card password: the password already on the card — needed to re-write or unprotect a card you previously locked (leave 00000000 for a blank card); it is remembered automatically after a protected write. Unlock HID removes write-protection on a locked card by rewriting it as an unprotected plain EM4100 T5577 (config 00148040): it authenticates with the known keys to clear the password, then writes a valid EM4100 (the 125 kHz tab's id, or 1) and the open config. Writing a real (non-blank) id leaves the card in a state that accepts a direct HID re-write — a blank id 0 does not. The card is a plain EM4100 afterwards; re-write it as HID if needed. AWID, FDX-B and Paradox follow once captured.")
+        let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). Current card password: the password already on the card — needed to re-write or unprotect a card you previously locked (leave 00000000 for a blank card); it is remembered automatically after a protected write. Unlock HID identifies the card's password by testing the known keys one at a time (stopping at the one that works), reports it, and converts the card to an unprotected plain EM4100 (the 125 kHz tab's id, or 1 — a real, non-blank id so a direct HID re-write works). The found password is shown in Current card password for reference; the card itself is left unprotected. Re-write it as HID or EM afterwards. AWID, FDX-B and Paradox follow once captured.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         hidRefresh()
         return vstack([head("HID Prox"), row, protRow, hidInfo, note])
@@ -450,60 +450,129 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         }
     }
 
-    // --- HID unlock → plain T5577 / EM4100 ---------------------------------
-    // VERIFIED against a capture of the reference program removing HID protection. The unlock is NOT a
-    // special FSK/HID-mode operation — it uses the standard LF framing and simply rewrites the card as
-    // a blank, unprotected EM4100 T5577: (1) force the password block 7 to 0, authenticating with each
-    // candidate current-password (op13); (2) write a blank EM4100 — block1 = FF800000, block2 = 0 —
-    // and config block 0 = 00148040 (PWD bit cleared), each as op12 then op13 (pwd 0); (3) finalize.
-    // The password-clearing writes come first (while the card is still protected), then the data/config
-    // writes authenticate with the now-zero password; the config write clears the PWD bit last. This
-    // matches "write a locked HID card and then unlock it as a plain T5577 (EM4nnn)". The card is no
-    // longer HID afterwards — re-write it as HID if that's wanted.
+    // --- HID unlock → plain EM4100, with password identification -----------
+    // Identifies which password the locked HID card holds, then converts it to an unprotected plain
+    // EM4100. A locked HID card modulates in FSK, so it can't be read as EM up front; instead we test
+    // ONE key at a time: clear block 7 with the candidate (op13), write a MARKER EM id + the open EM
+    // config 00148040 with password 0, then read back in EM/ASK mode. Only the real password lets those
+    // writes land, so a marker read-back identifies the key. Wrong keys change nothing (every write is
+    // rejected) — the card stays a locked HID. On a match we rewrite the real id and report the key.
+    // The final card is an unprotected plain EM4100 (a real, non-blank id so a direct HID re-write
+    // works). Found password is shown in "Current card password" for reference; the card itself is now
+    // unprotected (writes still succeed because the write path always includes password 0).
+    enum HIDULPhase { case idle, precheck, test }
     var hidUlActive = false
+    var hidUlPhase: HIDULPhase = .idle
+    var hidUlKeys: [[UInt8]] = []
+    var hidUlIdx = 0
+    var hidUlFreq: UInt32 = 125000
+    var hidUlQueue: [([UInt8], String)] = []
+    var hidUlAwait = false
+    var hidUlRetries = 0
+    var hidUlEmId: UInt64 = 1
+    var hidUlMarker: UInt64 = 0
+    let hidUlGap = 0.08
+    let hidUlSettle = 0.2
+    let kEMUnlockedCfg: [UInt8] = [0x00,0x14,0x80,0x40]     // EM4100 config, PWD bit (0x10) cleared
     func hidUnlockKeys() -> [[UInt8]] {
         var keys: [[UInt8]] = []
         func add(_ k: [UInt8]) { if !keys.contains(where: { $0 == k }) { keys.append(k) } }
-        for k in kT5NormalizeKeys { add(keyBytes(k)) }      // C0F5009A, 0, 19920427, 1C0B5848, Tian
-        add(fieldKey(hidPwd.stringValue))                   // the password set here
+        add([0,0,0,0])                                      // already-unprotected / blank
+        add(fieldKey(hidUnlock.stringValue))                // the card's current password, if known
+        add(fieldKey(hidPwd.stringValue))                   // the protect password set here
         add(fieldKey(lfT5Found.stringValue))                // T5577 Unlock Password field
+        for k in kT5NormalizeKeys { add(keyBytes(k)) }      // C0F5009A, 19920427, 1C0B5848, Tian
         for k in defaultLFKeys() { add(keyBytes(k)) }       // any other known keys
         return keys
     }
     func startHIDUnlock() {
         guard recPhase == .idle, !ulActive, !hidReadActive, !hidUlActive else { log("busy — another operation is running"); return }
-        hidUlActive = true
-        let freq = parseU32(idFreq.stringValue)
-        let cands = hidUnlockKeys()
-        let zero: [UInt8] = [0,0,0,0]
-        // Rewrite as a VALID, non-blank EM4100. A blank (ID 0) card leaves the chip in a state the
-        // next HID write won't latch onto — a real EM write is what makes a direct HID re-write work —
-        // so we lay down a real EM id: the 125 kHz tab's id, or 1 if that is 0/blank.
-        let emId = currentCardId() == 0 ? UInt64(1) : currentCardId()
-        let (w1, w2) = em4100Words(emId)
-        let em1 = u32be(w1), em2 = u32be(w2)
-        let em0: [UInt8] = [0x00,0x14,0x80,0x40]            // EM config, PWD bit (0x10) cleared
-        log(String(format: "Unlock HID → plain T5577/EM4100: clearing password (sweep %d key(s)) and rewriting as EM4100 id %010llX, config 00148040 (unprotected)…", cands.count, emId))
-        var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config")]
-        // 1) Force block 7 (password) to 0, authenticating with every candidate current-password.
-        for c in cands { seq.append((lfT5Write(addr: 7, word: zero, pwd: c, freq: freq), "block7 = 0 (auth \(hexJoin(c)))")) }
-        // 2) Write the EM4100 data + unprotected config. op12 (no-pwd) then op13 (pwd 0) per block.
-        let blocks: [(UInt8,[UInt8],String)] = [
-            (1, em1, "block1 = \(hexJoin(em1))"), (2, em2, "block2 = \(hexJoin(em2))"),
-            (0, em0, "block0 = 00148040")]
-        for (blk, d, name) in blocks {
-            seq.append((lfT5WriteNoPwd(addr: blk, word: d, freq: freq), "\(name) op12"))
-            seq.append((lfT5Write(addr: blk, word: d, pwd: zero, freq: freq), "\(name) op13"))
+        hidUlActive = true; hidUlPhase = .precheck; hidUlIdx = 0; hidUlRetries = 0; hidUlAwait = false
+        hidUlFreq = parseU32(idFreq.stringValue)
+        hidUlKeys = hidUnlockKeys()
+        hidUlEmId = currentCardId() == 0 ? UInt64(1) : currentCardId()
+        hidUlMarker = hidUlEmId ^ 1                          // distinct probe id; real id restored on match
+        log(String(format: "Unlock HID: identifying the card's password (testing %d key(s)), then converting to plain EM4100 id %010llX…", hidUlKeys.count, hidUlEmId))
+        hidUnlock.stringValue = "unlocking…"
+        sendPayload(lfRFConfig(freq: hidUlFreq), "RF config")
+        afterDelay(hidUlSettle) { [weak self] in guard let s = self else { return }
+            s.hidUlAwait = true; s.sendPayload(lfRead(freq: s.hidUlFreq), "precheck read") }
+    }
+    func hidUlStep() {
+        if !hidUlQueue.isEmpty { let c = hidUlQueue.removeFirst(); afterDelay(hidUlGap) { [weak self] in self?.sendPayload(c.0, c.1) } }
+        else { hidUlAwait = true; hidUlRetries = 0; afterDelay(hidUlSettle) { [weak self] in guard let s = self else { return }; s.sendPayload(lfRead(freq: s.hidUlFreq), "probe read") } }
+    }
+    // Per-key probe: clear block 7 with the candidate, then write the MARKER EM id + open config with
+    // password 0. Only the real password lets block 7 clear, after which the pwd-0 writes take and the
+    // card flips to plain EM; a wrong key leaves everything rejected and the card a locked HID.
+    func hidUlProbeQueue(_ k: [UInt8]) -> [([UInt8], String)] {
+        let (w1, w2) = em4100Words(hidUlMarker)
+        return [
+            (lfT5Write(addr: 7, word: [0,0,0,0], pwd: k, freq: hidUlFreq), "clear pwd auth \(hexJoin(k))"),
+            (lfT5WriteNoPwd(addr: 1, word: u32be(w1), freq: hidUlFreq), "probe blk1 op12"),
+            (lfT5Write(addr: 1, word: u32be(w1), pwd: [0,0,0,0], freq: hidUlFreq), "probe blk1 op13"),
+            (lfT5WriteNoPwd(addr: 2, word: u32be(w2), freq: hidUlFreq), "probe blk2 op12"),
+            (lfT5Write(addr: 2, word: u32be(w2), pwd: [0,0,0,0], freq: hidUlFreq), "probe blk2 op13"),
+            (lfT5WriteNoPwd(addr: 0, word: kEMUnlockedCfg, freq: hidUlFreq), "probe cfg op12"),
+            (lfT5Write(addr: 0, word: kEMUnlockedCfg, pwd: [0,0,0,0], freq: hidUlFreq), "probe cfg op13"),
+            (lfModeCmd(0x05, freq: hidUlFreq), "LF read-mode"),
+        ]
+    }
+    func hidUlNextKey() {
+        guard hidUlIdx < hidUlKeys.count else {
+            hidUlActive = false; hidUlPhase = .idle
+            hidUnlock.stringValue = "00000000"
+            log("✗ Unlock HID: none of \(hidUlKeys.count) known keys unlocked the card — its password isn't in the known set. The card is unchanged.")
+            return
         }
-        seq.append((lfModeCmd(0x64, freq: freq), "finalize"))
-        sendSeq(seq, gap: 0.28)
-        afterDelay(Double(seq.count) * 0.28 + 0.6) { [weak self] in
-            guard let self = self else { return }
-            self.hidUlActive = false
-            self.hidProtect.state = .off
-            self.hidPwd.stringValue = "00000000"
-            self.hidUnlock.stringValue = "00000000"
-            self.log(String(format: "✓ Unlock HID done: password removed; card is now an unprotected plain EM4100 (id %010llX, config 00148040). You can re-write it directly as HID or EM.", emId))
+        hidUlQueue = hidUlProbeQueue(hidUlKeys[hidUlIdx]); hidUlAwait = false; hidUlStep()
+    }
+    func hidUlKeyFound() {
+        let k = hidUlKeys[hidUlIdx]
+        hidUlActive = false; hidUlPhase = .idle
+        // Card is now an unprotected plain EM holding the MARKER id — rewrite the real id and verify.
+        let (w1, w2) = em4100Words(hidUlEmId)
+        writeExpectId = hidUlEmId; writeExpectEM = false
+        let seq: [([UInt8], String)] = [
+            (lfT5WriteNoPwd(addr: 1, word: u32be(w1), freq: hidUlFreq), "restore blk1"),
+            (lfT5WriteNoPwd(addr: 2, word: u32be(w2), freq: hidUlFreq), "restore blk2"),
+            (lfT5WriteNoPwd(addr: 0, word: kEMUnlockedCfg, freq: hidUlFreq), "cfg 00148040"),
+            (lfModeCmd(0x05, freq: hidUlFreq), "LF read-mode"),
+            (lfRead(freq: hidUlFreq), "verify read"),
+        ]
+        sendSeq(seq, gap: 0.2)
+        hidProtect.state = .off
+        hidPwd.stringValue = "00000000"
+        hidUnlock.stringValue = hexJoin(k)                  // show the found (old) password for reference
+        if k == [0,0,0,0] { log(String(format: "✓ Unlock HID: card had no password; converted to an unprotected plain EM4100 id %010llX.", hidUlEmId)) }
+        else { log(String(format: "✓ Unlock HID: password was %@ — removed; card converted to an unprotected plain EM4100 id %010llX. (The old password is shown in Current card password for reference; the card itself is now unprotected.)", hexJoin(k), hidUlEmId)) }
+    }
+    func handleHIDUnlock(_ bytes: [UInt8]) {
+        let emid = recEMid(bytes)
+        switch hidUlPhase {
+        case .precheck:
+            if let id = emid {                              // already reads as plain EM → not a locked HID
+                hidUlActive = false; hidUlPhase = .idle
+                hidUnlock.stringValue = "00000000"
+                log(String(format: "Unlock HID: card already reads as a plain EM4100 (id %010llX) — not a locked HID card, nothing to unlock.", id))
+                return
+            }
+            if hidUlRetries < 3 {
+                hidUlRetries += 1
+                afterDelay(hidUlSettle) { [weak self] in guard let s = self else { return }; s.sendPayload(lfRead(freq: s.hidUlFreq), "precheck read") }
+                return
+            }
+            hidUlRetries = 0; hidUlIdx = 0; hidUlPhase = .test; hidUlNextKey()   // locked → sweep keys
+        case .test:
+            if !hidUlAwait { hidUlStep(); return }          // a write ack arrived → send the next command
+            if let id = emid {
+                if id == hidUlMarker { hidUlKeyFound() }     // marker took → this key is the password
+                else { hidUlRetries = 0; hidUlIdx += 1; hidUlNextKey() }   // unchanged → wrong key, next
+            } else if hidUlRetries < 3 {                    // read glitch → retry
+                hidUlRetries += 1
+                afterDelay(hidUlSettle) { [weak self] in guard let s = self else { return }; s.sendPayload(lfRead(freq: s.hidUlFreq), "probe read") }
+            } else { hidUlRetries = 0; hidUlIdx += 1; hidUlNextKey() }
+        case .idle: break
         }
     }
 
@@ -1044,6 +1113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fPayload.stringValue = p.payloadHex.isEmpty ? "—" : p.payloadHex
         fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
         if recPhase != .idle { handleRecovery(bytes) }
+        else if hidUlActive { handleHIDUnlock(bytes) }
         else if hidReadActive { handleHIDRead(bytes) }
         else if ulActive { handleUnlock(bytes) }
         else if let want = writeExpectId, let id = recEMid(bytes) {   // verify a write actually took
