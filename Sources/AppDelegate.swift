@@ -54,7 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let lfWord = NSTextField(string: "00000000")
     var chipEM4305 = false   // false = T5577 (op 0x13), true = EM4305 (op 0x12)
     let lfPwd = NSTextField(string: "00000000")
-    let pwdReverse = NSButton(checkboxWithTitle: "reverse pwd bytes", target: nil, action: nil)
+    let lfT5Found = NSTextField(labelWithString: "—")
+    let lfEMFound = NSTextField(labelWithString: "—")
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
     let rawFrame = NSTextField(string: "01 0F 00 00 FF 00 9A 5A A5 54 69 61 6E")
     var regFields: [UInt8: NSTextField] = [:]
@@ -290,9 +291,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let writeRow = hstack([labeled("Card #:", field(lfWriteId, 130)),
                                labeled("Config:", field(lfConfig, 90)),
                                ActionButton("Write EM4100") { [weak self] in self?.writeEM() }])
-        let pwdRow = hstack([labeled("Password:", field(lfPwd, 100)), pwdReverse,
+        lfT5Found.font = mono(11); lfT5Found.isSelectable = true
+        lfEMFound.font = mono(11); lfEMFound.isSelectable = true
+        let pwdRow = hstack([labeled("Password:", field(lfPwd, 100)),
                              ActionButton("Find T5577 pwd") { [weak self] in self?.findPwd(false) },
                              ActionButton("Find EM4305 pwd") { [weak self] in self?.findPwd(true) }])
+        let foundRow = hstack([labeled("T5577 pwd:", lfT5Found), labeled("EM4305 pwd:", lfEMFound)])
         let blkRow = hstack([labeled("Addr:", field(lfBlk, 40)),
                              labeled("Word (hex):", field(lfWord, 100)),
                              ActionButton("Write word") { [weak self] in self?.writeBlockManual() }])
@@ -300,7 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
         let note = NSTextField(wrappingLabelWithString: "Read ID uses FF 00 65 05 1E <freq> 00 00 00 00 → 5-byte EM4100 id. 0x68 = model/firmware, 0x69 = serial. 0x65 experimenter is for probing other LF modes.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), dev, readRow, freqs, chipRow, writeRow, pwdRow, blkRow, exp, warn, note])
+        return vstack([head("125 kHz ID"), dev, readRow, freqs, chipRow, writeRow, pwdRow, foundRow, blkRow, exp, warn, note])
     }
     func setFreq(_ f: UInt32) { idFreq.stringValue = String(f) }
 
@@ -317,10 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     // EM4100 data write to the selected chip (T5577 op 0x13 / EM4305 op 0x12): data to addr 1,2,
     // config to addr 0, then read back to verify. No password/lock.
-    func currentPwd() -> [UInt8] {
-        let b = keyBytes(lfPwd.stringValue)
-        return pwdReverse.state == .on ? rev4(b) : b
-    }
+    func currentPwd() -> [UInt8] { keyBytes(lfPwd.stringValue) }
     func writeEM() {
         let id = parseU40(lfWriteId.stringValue)
         let (w1, w2) = em4100Words(id)
@@ -362,6 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func findPwd(_ em4305: Bool) {
         guard recPhase == .idle else { log("recovery already running"); return }
         recEM = em4305; recFreq = parseU32(idFreq.stringValue)
+        (em4305 ? lfEMFound : lfT5Found).stringValue = "searching…"
         recCands = kLFKeyDict.flatMap { k in keyForms(k).map { (k + $0.0, $0.1) } }
         recIdx = 0; recPhase = .readOrig
         log("Find \(em4305 ? "EM4305" : "T5577") password: reading current id…")
@@ -388,6 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func tryRecCandidate() {
         guard recIdx < recCands.count else {
             log("✗ password not found in dictionary (\(recCands.count) tried); card unchanged")
+            (recEM ? lfEMFound : lfT5Found).stringValue = "not found"
             recPhase = .idle; return
         }
         let (label, key) = recCands[recIdx]
@@ -406,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             if id == recMarker {
                 let (label, key) = recCands[recIdx]
                 recPhase = .idle
+                (recEM ? lfEMFound : lfT5Found).stringValue = "\(label)  (\(hex(key)))"
                 log("✓ PASSWORD FOUND: \(label)  (wire \(hex(key))) — restoring original id")
                 sendSeq(recWriteSeq(id: recOrig, key: key, label: "restore"), gap: 0.12)
             } else {
