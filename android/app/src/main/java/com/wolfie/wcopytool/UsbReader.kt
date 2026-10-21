@@ -153,11 +153,15 @@ class UsbReader(private val mgr: UsbManager) {
         val (mw1, mw2) = Proto.em4100Words(marker)
         val z = intArrayOf(0, 0, 0, 0)
         log("unlock: baseline id=%010X  probe-marker=%010X".format(orig, marker))
-        // Precheck "already unprotected": write the marker authenticating with password 0 (op13). On
-        // this device op13 is what commits a write, and it is accepted only when the card is open (or its
-        // password is 0) — so a readback of the marker means unprotected. (A no-pwd op12 write alone does
-        // not reliably commit on this device, so it can't be used here.)
+        // Precheck "already unprotected": write the marker authenticating with password 0 (op13); a
+        // readback of the marker means the card is open. IMPORTANT: this device silently drops the FIRST
+        // write issued after a read/config, so we send a throwaway prime write (block 7 = 0, auth 0 — a
+        // no-op on an open card and rejected on a protected one) to absorb that drop; the marker writes
+        // that follow then actually commit. Without the prime, an already-open card read back its baseline
+        // id and was wrongly swept (returning a false password). On a protected card the auth-0 writes are
+        // rejected (block 7 enforces auth), the marker never commits, and we fall through to the sweep.
         transact(Proto.lfRFConfig(freq))
+        transact(Proto.lfT5Write(7, z, z, freq)); Thread.sleep(120)   // prime — absorbs the dropped first write
         transact(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
         transact(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
         Thread.sleep(200)
@@ -165,6 +169,7 @@ class UsbReader(private val mgr: UsbManager) {
         log("precheck readback=%010X".format(pre ?: -1L))
         if (pre == marker) { log("precheck: card is unprotected"); restoreT5(orig, z, freq, log); log("card has no password (not protected)"); return "no password" }
         log("precheck: protected — sweeping ${keys.size} key(s)")
+        transact(Proto.lfT5Write(7, z, z, freq)); Thread.sleep(80)   // prime so the first key's write isn't the dropped one
         for ((i, k) in keys.withIndex()) {
             // Clear block 7 with the candidate, then write the marker with password 0 — only the real
             // password lets block 7 clear, so only then does the pwd-0 marker write take.
