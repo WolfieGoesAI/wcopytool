@@ -381,11 +381,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let protRow = hstack([hidProtect, field(hidPwd, 100),
                               labeled("Current card password:", field(hidUnlock, 100)), hidAnimal])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
-        let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). For FDX-B the two fields are Country code and National ID (38-bit, so it can be large), config 00098080, 4 data blocks — the 'FDX-B animal flag' sets the animal bit. Current card password: the password already on the card — needed to re-write or unprotect a card you previously locked (leave 00000000 for a blank card); it is remembered automatically after a protected write. Unlock HID identifies the card's password by testing the known keys one at a time (stopping at the one that works), reports it, and converts the card to an unprotected plain EM4100 (the 125 kHz tab's id, or 1 — a real, non-blank id so a direct HID re-write works). The found password is shown in Current card password for reference; the card itself is left unprotected. Re-write it as HID or EM afterwards. AWID 26-bit, Paradox and FDX-B are write-only (this reader can't read them back) but are confirmed working on an external reader. If a write doesn't take, re-seat the card and write again.")
-        note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         hidRefresh()
         let revRow = hstack([NSTextField(labelWithString: "Unlock HID also try:"), hidBitRev, hidByteRev])
-        return vstack([head("HID Prox"), row, protRow, revRow, hidInfo, note])
+        return vstack([row, protRow, revRow, hidInfo])
     }
     @objc func hidEdited() { hidRefresh() }
     func hidFormat() -> HIDFormat { HIDFormat(rawValue: hidFmtPop.indexOfSelectedItem) ?? .h10301 }
@@ -1056,9 +1054,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let cols = hstack([edScroll, mirScroll])
         NSLayoutConstraint.activate([
             edScroll.widthAnchor.constraint(equalToConstant: 180), edScroll.heightAnchor.constraint(equalToConstant: 360),
-            mirScroll.widthAnchor.constraint(equalToConstant: 470), mirScroll.heightAnchor.constraint(equalToConstant: 360),
+            mirScroll.widthAnchor.constraint(equalToConstant: 560), mirScroll.heightAnchor.constraint(equalToConstant: 360),
         ])
-        let note = NSTextField(wrappingLabelWithString: "One hex password (8 hex digits) per line. These are the keys Unlock tries and the current-password candidates; the two Unlock Password fields and the Write Lock Password are also tried automatically. The right column shows each key with its bit-reversed (binary-mirror) and byte-reversed equivalents — T5577 and EM4305 passwords are sometimes mirrors of each other.")
+        let note = NSTextField(wrappingLabelWithString: "One hex password (8 hex digits) per line. These are the keys Unlock tries and the current-password candidates; the two Unlock Password fields and the Write Lock Password are also tried automatically. The right columns show each key's bit-reversed (binary-mirror) and byte-reversed equivalents — T5577 and EM4305 passwords are sometimes mirrors of each other — plus its ASCII text (e.g. 5469616E → \u{201C}Tian\u{201D}, 576F6C66 → \u{201C}Wolf\u{201D}; non-printable bytes shown as ·).")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         refreshMirror()
         return vstack([head("Known passwords (editable)"), hstack([apply, reset]), cols, note])
@@ -1074,10 +1072,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         log("Passwords: applied \(keyList.count) keys.")
         refreshMirror()
     }
+    // 4-byte hex key → its ASCII text (printable bytes shown, others as '·'), e.g. 5469616E → "Tian".
+    func asciiOfHex(_ hex: String) -> String {
+        return keyBytes(hex).map { (0x20...0x7E).contains($0) ? Character(UnicodeScalar($0)) : "·" }.reduce(into: "") { $0.append($1) }
+    }
     func refreshMirror() {
-        let header = String(format: "%-10@  %-10@  %@\n", "password" as NSString, "bit-rev" as NSString, "byte-rev" as NSString)
-        var lines = [header + String(repeating: "─", count: 34)]
-        for k in keyList { lines.append(String(format: "%-10@  %-10@  %@", k as NSString, bitReverse32Hex(k) as NSString, byteReverseHex(k) as NSString)) }
+        let header = String(format: "%-10@  %-10@  %-10@  %@\n", "password" as NSString, "bit-rev" as NSString, "byte-rev" as NSString, "ascii" as NSString)
+        var lines = [header + String(repeating: "─", count: 42)]
+        for k in keyList {
+            lines.append(String(format: "%-10@  %-10@  %-10@  %@", k as NSString, bitReverse32Hex(k) as NSString, byteReverseHex(k) as NSString, asciiOfHex(k) as NSString))
+        }
         pwdMirror.string = lines.joined(separator: "\n")
     }
 
