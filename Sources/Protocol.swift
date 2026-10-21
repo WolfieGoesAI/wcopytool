@@ -311,7 +311,53 @@ let kT5HIDConfigWire: [UInt8] = [0x00,0x10,0x70,0x60]
 
 // LF prox formats this app can write. HID 26/37 are capture-verified; AWID 26 is spec-based
 // (Proxmark getAWIDBits) and WRITE-ONLY (this reader can't read AWID back) — verify on another reader.
-enum HIDFormat: Int { case h10301 = 0, h10304 = 1, awid26 = 2, paradox = 3 }   // HID 26/37, AWID 26, Paradox
+enum HIDFormat: Int { case h10301 = 0, h10304 = 1, awid26 = 2, paradox = 3, fdxb = 4 }
+
+// Base T5577 config (block 0) per format. The PWD bit (0x10) is OR'd in by the caller when protecting.
+func lfProxConfig(_ fmt: HIDFormat) -> UInt32 {
+    switch fmt {
+    case .fdxb: return 0x00098080    // DIPHASE, RF/32, 4 data blocks (128-bit FDX-B stream)
+    default:    return 0x00107060    // FSK2a, RF/50, 3 data blocks (HID / AWID / Paradox)
+    }
+}
+
+// CRC-16 as Proxmark crc16_fdxb: poly 0x1021, init 0x0000, refin=false, refout=true, xorout=0.
+func crc16Fdxb(_ data: [UInt8]) -> UInt16 {
+    var crc: UInt16 = 0x0000
+    for b in data {
+        crc ^= UInt16(b) << 8
+        for _ in 0..<8 { crc = (crc & 0x8000) != 0 ? (crc << 1) ^ 0x1021 : (crc << 1) }
+    }
+    var r: UInt16 = 0                                       // refout: reverse the 16 bits
+    for i in 0..<16 { r = (r << 1) | ((crc >> UInt16(i)) & 1) }
+    return r
+}
+// FDX-B (ISO 11784/85, DIPHASE RF/32) → four T5577 data blocks (blocks 1-4). Faithful port of
+// Proxmark getFDXBBits. SPEC-BASED, not yet verified on a reader. national = 38-bit, country = 10-bit.
+func fdxbBlocks(country: UInt32, national: UInt64, animal: Bool = false) -> [UInt32] {
+    var bs = [Int](repeating: 1, count: 128)
+    for i in 0..<10 { bs[i] = 0 }
+    bs[10] = 1                                              // header: ten 0s then a 1
+    for k in 0..<13 { bs[19 + 9 * k] = 1 }                 // marker '1' every 9th bit
+    func put(_ start: Int, _ n: Int, _ val: UInt64) { for i in 0..<n { bs[start + i] = Int((val >> UInt64(i)) & 1) } }
+    let nat = national & 0x3FFFFFFFFF                       // 38-bit
+    put(11, 8, nat & 0xFF); put(20, 8, (nat >> 8) & 0xFF); put(29, 8, (nat >> 16) & 0xFF)
+    put(38, 8, (nat >> 24) & 0xFF); put(47, 6, (nat >> 32) & 0x3F)
+    let cc = UInt64(country & 0x3FF)                        // 10-bit
+    put(53, 2, cc & 0x3); put(56, 8, (cc >> 2) & 0xFF)
+    bs[65] = 0                                              // extended-data flag (none)
+    for i in 66..<73 { bs[i] = 0 }; for i in 74..<81 { bs[i] = 0 }   // reserved
+    bs[81] = animal ? 1 : 0
+    func b8(_ a: Int) -> UInt8 { var v = 0; for j in 0..<8 { v = (v << 1) | bs[a + j] }; return UInt8(v) }
+    let raw = (0..<8).map { b8(11 + 9 * $0) }               // MSB-first data bytes for the CRC
+    let crc = crc16Fdxb(raw)
+    put(83, 8, UInt64(crc & 0xFF)); put(92, 8, UInt64((crc >> 8) & 0xFF))
+    // extended data block left zero (bs[101..126] already 1-filled baseline, markers aside — zero it)
+    for s in [101, 110, 119] { put(s, 8, 0) }
+    var out = [UInt32](repeating: 0, count: 4)
+    for i in 0..<128 { out[i / 32] = (out[i / 32] << 1) | UInt32(bs[i]) }
+    return out
+}
 
 // Dallas/Maxim CRC-8 (poly 0x31 reflected = 0x8C, init 0), used by Paradox.
 func crc8Maxim(_ data: [UInt8]) -> UInt8 {
@@ -422,7 +468,7 @@ func hidValue(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> UInt64 {
     switch fmt {
     case .h10301: return 0x2000000000 | (UInt64(1) << 26) | UInt64(hidWiegand26(fc, cn))
     case .h10304: return hidWiegand37(fc, cn)
-    case .awid26, .paradox: return 0  // these use their own block builders, not the HID "value" path
+    case .awid26, .paradox, .fdxb: return 0  // these use their own block builders, not the HID "value" path
     }
 }
 
