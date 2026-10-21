@@ -153,21 +153,24 @@ class UsbReader(private val mgr: UsbManager) {
         val (mw1, mw2) = Proto.em4100Words(marker)
         val z = intArrayOf(0, 0, 0, 0)
         log("unlock: baseline id=%010X  probe-marker=%010X".format(orig, marker))
-        // Precheck "already unprotected": write the marker authenticating with password 0 (op13); a
-        // readback of the marker means the card is open. IMPORTANT: this device silently drops the FIRST
-        // write issued after a read/config, so we send a throwaway prime write (block 7 = 0, auth 0 — a
-        // no-op on an open card and rejected on a protected one) to absorb that drop; the marker writes
-        // that follow then actually commit. Without the prime, an already-open card read back its baseline
-        // id and was wrongly swept (returning a false password). On a protected card the auth-0 writes are
-        // rejected (block 7 enforces auth), the marker never commits, and we fall through to the sweep.
+        // Precheck "already unprotected": attempt to open with password 0 using the SAME write sequence
+        // the restore uses — the logs show this is what makes the marker write actually commit on this
+        // device (a lone marker write after lfRFConfig is silently dropped, but after the block-0 write
+        // with its settle it lands reliably). Writing block 0 = 00148040 (auth 0) is a no-op on an open
+        // card and is REJECTED on a protected one (block writes enforce auth — proven by the sweep lines
+        // where block 7 won't clear with a wrong key), so the marker only commits, and the readback only
+        // equals the marker, when the card was already open. Confirm a positive with a second read since
+        // single reads glitch (FFFF…) on this hardware.
         transact(Proto.lfRFConfig(freq))
-        transact(Proto.lfT5Write(7, z, z, freq)); Thread.sleep(120)   // prime — absorbs the dropped first write
+        transact(Proto.lfT5Write(7, z, z, freq)); Thread.sleep(150)
+        transact(Proto.lfT5Write(0, Proto.u32be(0x00148040L), z, freq)); Thread.sleep(260)
         transact(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
         transact(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
         Thread.sleep(200)
         val pre = readEMId(freq)
-        log("precheck readback=%010X".format(pre ?: -1L))
-        if (pre == marker) { log("precheck: card is unprotected"); restoreT5(orig, z, freq, log); log("card has no password (not protected)"); return "no password" }
+        val pre2 = if (pre == marker) readEMId(freq) else null
+        log("precheck readback=%010X%s".format(pre ?: -1L, if (pre == marker) " confirm=%010X".format(pre2 ?: -1L) else ""))
+        if (pre == marker && pre2 == marker) { log("precheck: card is unprotected"); restoreT5(orig, z, freq, log); log("card has no password (not protected)"); return "no password" }
         log("precheck: protected — sweeping ${keys.size} key(s)")
         transact(Proto.lfT5Write(7, z, z, freq)); Thread.sleep(80)   // prime so the first key's write isn't the dropped one
         for ((i, k) in keys.withIndex()) {
@@ -179,7 +182,8 @@ class UsbReader(private val mgr: UsbManager) {
             Thread.sleep(200)
             val rb = readEMId(freq)
             if (i < 4) log("key ${Proto.hexJoin(k)} -> readback=%010X".format(rb ?: -1L))
-            if (rb == marker) { val ks = Proto.hexJoin(k); log("password is $ks — clearing protection"); restoreT5(orig, k, freq, log); return ks }
+            // Confirm a hit with a second read — this hardware occasionally glitches a readback.
+            if (rb == marker && readEMId(freq) == marker) { val ks = Proto.hexJoin(k); log("password is $ks — clearing protection"); restoreT5(orig, k, freq, log); return ks }
             if (i % 8 == 7) log("…tried ${i + 1}/${keys.size}")
         }
         log("not found in ${keys.size} keys"); return "not found"
