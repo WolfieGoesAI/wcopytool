@@ -235,10 +235,33 @@ func lfReadPwd(pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
 }
 
 // Password-aware LF write helpers (byte-array form avoids endianness confusion).
-//   T5577 block write (op 0x13): data word + password word (password = 0 for unprotected).
+//   T5577 block write WITH password (op 0x13): data word + password word.
 func lfT5Write(addr: UInt8, word: [UInt8], pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
     lfT5WriteMode(addr: addr, word: word, pwd: pwd, freq: freq, mode: 0x00)
 }
+//   T5577 block write WITHOUT password (op 0x12): 16-byte frame, no trailing password.
+//   The original app issues op 0x12 then op 0x13 for every block (covers unprotected + protected).
+func lfT5WriteNoPwd(addr: UInt8, word: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
+    [0xFF,0x00,0x66,0x00,0x1E] + u32le(freq) + [0x12,0x00,addr] + pad4(word)
+}
+//   LF mode/field control (op 0x00): the app brackets LF ops with 00 <sub> 00 00 (sub 0x14 before
+//   writes, 0x05 before reads).
+func lfModeCmd(_ sub: UInt8, freq: UInt32 = 125000) -> [UInt8] {
+    [0xFF,0x00,0x66,0x00,0x1E] + u32le(freq) + [0x00, sub, 0x00, 0x00]
+}
+//   RF front-end config (op 0x1F) exactly as the original app sends it.
+func lfRFConfig(freq: UInt32 = 125000) -> [UInt8] {
+    [0xFF,0x00,0x66,0x00,0x1E] + u32le(freq) + [0x1F,0x18,0x01,0xEF,0x00,0x9B,0x00,0x86,0x01]
+}
+// T5577 EM4100 config written by the original app (block 0) — note 0x50, not 0x40.
+let kT5ConfigWire: [UInt8] = [0x00,0x14,0x80,0x50]
+// Default write password the original app sets on every card: "Tian" (ASCII 54 69 61 6E).
+let kT5DefaultPwdHex = "5469616E"
+// Old passwords the app authenticates with to force the password to a known value (block 7).
+let kT5NormalizeKeys = ["C0F5009A","00000000","19920427","1C0B5848","5469616E"]
+// EM4305 login passwords the app tries before setting word2 = "Tian" (wire bytes from the capture:
+// 00000000 and 05 d7 3b 9f = LE of 0x9F3BD705).
+let kEM4305NormalizeKeys = ["00000000","05D73B9F"]
 //   T5577 block write with an explicit mode/flag byte (the byte between op 0x13 and the block
 //   number — always 0x00 in normal writes). Used by the test-mode unbrick to probe whether the
 //   firmware exposes Proxmark-style test mode / downlink waveforms (r0..r3) for block-0 recovery.

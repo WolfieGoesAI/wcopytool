@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let lfMode = NSTextField(string: "05")
     let lfTail = NSTextField(string: "00 00 00 00")
     let lfWriteId = NSTextField(string: "1234567890")
-    let lfConfig = NSTextField(string: "00148040")
+    let lfConfig = NSTextField(string: "00148050")
     let lfBlk = NSTextField(string: "1")
     let lfWord = NSTextField(string: "00000000")
     let lfPwd = NSTextField(string: "00000000")
@@ -262,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ActionButton("Device info (0x68)") { [weak self] in self?.sendPayload([0xFF,0x00,0x68], "device info") },
             ActionButton("Serial number (0x69)") { [weak self] in self?.sendPayload([0xFF,0x00,0x69], "serial") },
             ActionButton("Init / Reset reader") { [weak self] in self?.resetReader() },
-            ActionButton("Unbrick T5577 (pwd sweep)") { [weak self] in self?.unbrickT5() },
+            ActionButton("Revive LF (rewrite)") { [weak self] in self?.reviveT5() },
         ])
         // Confirmed LF read: FF 00 65 05 1E <freq> 00 00 00 00 → reply 02 0C 01 00 05 <5-byte EM id> CHK FD
         let readRow = hstack([labeled("Freq (Hz):", field(idFreq, 90)),
@@ -288,7 +288,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let writeRow = hstack([labeled("Card #:", field(lfWriteId, 130)),
                                labeled("Config:", field(lfConfig, 90)),
                                ActionButton("Write T5577") { [weak self] in self?.writeEM(false) },
-                               ActionButton("Write EM4305") { [weak self] in self?.writeEM(true) }])
+                               ActionButton("Write EM4305") { [weak self] in self?.writeEM(true) },
+                               ActionButton("Write all LF") { [weak self] in guard let s = self else { return }
+                                   s.writeLFAll(id: parseU40(s.lfWriteId.stringValue)) }])
         let pwdRow = hstack([labeled("Password:", field(lfPwd, 100)),
                              ActionButton("Find T5577 pwd (read)") { [weak self] in self?.findPwd(false) },
                              ActionButton("Find EM4305 pwd (read)") { [weak self] in self?.findPwd(true) }])
@@ -302,7 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                              labeled("Word (hex):", field(lfWord, 100)),
                              ActionButton("Write T5577 word") { [weak self] in self?.writeBlockManual(false) },
                              ActionButton("Write EM4305 word") { [weak self] in self?.writeBlockManual(true) }])
-        let warn = NSTextField(wrappingLabelWithString: "⚠︎ \u{201C}Find pwd (read)\u{201D} is non-destructive: it tests passwords by READING only (T5577 password-read, EM4305 login+read) and never writes, so it can\u{2019}t brick a card. It can only find a password on a read-protected card; a card that already reads without a password is write-protected only, and its write password can\u{2019}t be found by reading. Unlock/Write do write to the card. \u{201C}Unbrick T5577\u{201D} rewrites block 0 to a safe default, authenticating with every known password (this reader has no test mode — a card whose password is unknown can only be revived by a Proxmark).")
+        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write / Write all LF / Revive replicate the original app exactly: config 00148050, password set to \u{201C}Tian\u{201D}, each block written op12 (no pwd) then op13 (pwd), with the password first normalised via known keys — this is what makes cards the reader detects, and what revives a silent card. \u{201C}Find pwd (read)\u{201D} is read-only and never writes. This reader has no test mode (verified in the binary), so a card whose password is in no known set can only be revived by a Proxmark.")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
         let note = NSTextField(wrappingLabelWithString: "Read ID uses FF 00 65 05 1E <freq> 00 00 00 00 → 5-byte EM4100 id. 0x68 = model/firmware, 0x69 = serial. 0x65 experimenter is for probing other LF modes.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
@@ -329,36 +331,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         ], gap: 0.3)
     }
 
-    // T5577 "unbrick" — rewrite block 0 with a safe default config (0x000880E0) in test mode,
-    // mirroring Proxmark's recovery (lf t55 write -b 0 -d 000880E0 -t, then --r0..--r3 -t).
-    // Test mode bypasses the password; the downlink-mode sweep (flag byte) covers a card that only
-    // answers to one waveform. Writes are well-spaced so a confused card isn't hammered.
-    // NOTE: whether this firmware honours the test-mode/flag byte is unproven — if the card stays
-    // dark, revive it with the PC app or X7 (both confirmed working), then reprogram here.
-    // Reset a write-protected / mis-configured T5577 to a readable state by rewriting block 0 to a
-    // safe default config (0x000880E0), authenticating with each known password in turn. A write
-    // with the wrong password is ignored by the chip (harmless); the correct one resets the config
-    // and the card reads again. This is NOT Proxmark test mode — this reader's firmware has no test
-    // mode (verified in the binary: the T5577 write flags byte is always 0), so a card whose
-    // password is in no dictionary can only be revived by a Proxmark (direct-RF test mode).
-    func unbrickT5() {
-        let f = parseU32(idFreq.stringValue)
-        let cfg = u32be(kT5UnbrickConfig)
-        // Candidate passwords: the typed one first, then the script's four, then the full dictionary.
-        var pwds: [[UInt8]] = []
-        func addPwd(_ b: [UInt8]) { if !pwds.contains(where: { $0 == b }) { pwds.append(b) } }
-        let typed = currentPwd(); if typed != [0,0,0,0] { addPwd(typed) }
-        for h in kT5UnbrickPwds { addPwd(keyBytes(h)) }
-        for k in kLFKeyDict { addPwd(keyBytes(k)) }
-        log(String(format: "Unbrick T5577: rewriting block0 = %08X, authenticating with %d known passwords (no test mode — this reader can't)…", kT5UnbrickConfig, pwds.count))
-        var seq: [([UInt8], String)] = []
-        for p in pwds {
-            seq.append((lfT5WriteMode(addr: 0, word: cfg, pwd: p, freq: f, mode: 0x00), "blk0 pwd \(hex(p))"))
-        }
-        seq.append((lfRead(freq: f), "read after unbrick"))
-        sendSeq(seq, gap: 0.4)
-    }
-
     // Modal yes/no confirmation. Returns true if the user approves (always true in a headless run).
     func confirm(_ title: String, _ info: String, ok: String = "Proceed") -> Bool {
         let a = NSAlert()
@@ -383,31 +355,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // the chip actually accepted the write (vs. the device acking while a protected chip ignores it).
     var writeExpectId: UInt64? = nil
     var writeExpectEM = false
+    // Entry points: "Write T5577" and "Write EM4305" buttons. Both write the given chip's full
+    // sequence. The original app writes BOTH in one pass (so a copy works whatever the chip is);
+    // "Write all LF" / Revive does that.
     func writeEM(_ em4305: Bool) {
         let id = parseU40(lfWriteId.stringValue)
-        let (w1, w2) = em4100Words(id)
+        writeExpectId = id; writeExpectEM = em4305
+        var seq = [(lfRFConfig(freq: parseU32(idFreq.stringValue)), "RF config"),
+                   (lfModeCmd(0x14, freq: parseU32(idFreq.stringValue)), "LF begin")]
+        seq += (em4305 ? em4305Seq(id: id) : t5577Seq(id: id))
+        seq += finishLFSeq()
+        log("\(em4305 ? "EM4305" : "T5577") write id=\(String(format: "%010llX", id)) — \(seq.count) frames (op12+op13, password normalised)")
+        sendSeq(seq, gap: 0.3)
+    }
+    // Write every LF chip type in one pass (T5577 + EM4305), exactly as the original app does.
+    func writeLFAll(id: UInt64) {
+        writeExpectId = id; writeExpectEM = false
         let freq = parseU32(idFreq.stringValue)
-        let pwd = currentPwd()
-        writeExpectId = id; writeExpectEM = em4305      // armed; the verify read checks it
-        if em4305 {
-            // Native EM4305: login (with password), word5/6 = data, word4 = config, verify.
-            log(String(format: "EM4305 write id=%010llX  w1=%08X w2=%08X pwd=%@", id, w1, w2, hex(pwd)))
-            sendSeq([
-                (em4305LoginBytes(pwd: pwd, freq: freq), "EM4305 login"),
-                (em4305WriteWord(addr: 5, bytes: u32be(w1), freq: freq), "EM4305 word5 (data1)"),
-                (em4305WriteWord(addr: 6, bytes: u32be(w2), freq: freq), "EM4305 word6 (data2)"),
-                (em4305WriteWord(addr: 4, bytes: kEM4305ConfigWire, freq: freq), "EM4305 word4 (config)"),
-                (lfRead(freq: freq), "verify read"),
-            ])
+        var seq = [(lfRFConfig(freq: freq), "RF config"), (lfModeCmd(0x14, freq: freq), "LF begin")]
+        seq += t5577Seq(id: id)
+        seq += em4305Seq(id: id)
+        seq += finishLFSeq()
+        log("Write all LF types id=\(String(format: "%010llX", id)) — T5577 + EM4305, \(seq.count) frames")
+        sendSeq(seq, gap: 0.28)
+    }
+    func finishLFSeq() -> [([UInt8], String)] {
+        let freq = parseU32(idFreq.stringValue)
+        return [(lfModeCmd(0x05, freq: freq), "LF read-mode"), (lfRead(freq: freq), "verify read")]
+    }
+
+    // T5577 portion: normalize the password (block 7), then write blocks 1,2,0 with op12 (no pwd)
+    // then op13 (with pwd). Config 0x00148050, password "Tian" (or the Password field). Byte-for-byte
+    // the original app's sequence — this is what both writes and REVIVES a card.
+    func t5577Seq(id: UInt64) -> [([UInt8], String)] {
+        let freq = parseU32(idFreq.stringValue)
+        let (w1, w2) = em4100Words(id)
+        let typed = lfPwd.stringValue.trimmingCharacters(in: .whitespaces)
+        let pwd = typed.isEmpty ? keyBytes(kT5DefaultPwdHex) : keyBytes(typed)
+        let cfg = parseHexBlob(lfConfig.stringValue).count == 4 ? pad4(parseHexBlob(lfConfig.stringValue)) : kT5ConfigWire
+        var seq: [([UInt8], String)] = []
+        var keys = kT5NormalizeKeys
+        if !typed.isEmpty { keys = [typed] + keys }
+        for k in keys { seq.append((lfT5Write(addr: 7, word: pwd, pwd: keyBytes(k), freq: freq), "T5 set pwd (auth \(k))")) }
+        for (blk, data, name) in [(UInt8(1), u32be(w1), "T5 block1"), (2, u32be(w2), "T5 block2"), (0, cfg, "T5 block0 cfg")] {
+            seq.append((lfT5WriteNoPwd(addr: blk, word: data, freq: freq), "\(name) op12"))
+            seq.append((lfT5Write(addr: blk, word: data, pwd: pwd, freq: freq), "\(name) op13"))
+        }
+        return seq
+    }
+    // EM4305 portion: normalize the password to "Tian" (login with 0 and 9F3BD705, write word2),
+    // then login with "Tian" and write word5/6 = data, word4 = config (FA01A800). Matches the capture.
+    func em4305Seq(id: UInt64) -> [([UInt8], String)] {
+        let freq = parseU32(idFreq.stringValue)
+        let (w1, w2) = em4100Words(id)
+        let typed = lfPwd.stringValue.trimmingCharacters(in: .whitespaces)
+        let pwd = typed.isEmpty ? keyBytes(kT5DefaultPwdHex) : keyBytes(typed)
+        var seq: [([UInt8], String)] = []
+        for k in kEM4305NormalizeKeys {
+            seq.append((em4305LoginBytes(pwd: keyBytes(k), freq: freq), "EM login \(k)"))
+            seq.append((em4305WriteWord(addr: 2, bytes: pwd, freq: freq), "EM word2 = pwd"))
+        }
+        seq.append((em4305LoginBytes(pwd: pwd, freq: freq), "EM login pwd"))
+        seq.append((em4305WriteWord(addr: 5, bytes: u32be(w1), freq: freq), "EM word5 data1"))
+        seq.append((em4305WriteWord(addr: 6, bytes: u32be(w2), freq: freq), "EM word6 data2"))
+        seq.append((em4305WriteWord(addr: 4, bytes: kEM4305ConfigWire, freq: freq), "EM word4 cfg"))
+        return seq
+    }
+
+    // Revive: read whatever id the card still broadcasts (it reads even when write-protected); if it
+    // is truly silent, fall back to the Card# field. Then rewrite every LF type to bring it back.
+    func reviveT5() {
+        guard recPhase == .idle, !unlockActive, !reviveActive else { log("busy"); return }
+        reviveActive = true; reviveReadRetries = 0
+        log("Revive: reading current id (falls back to the Card # field if the card is silent)…")
+        sendPayload(lfRead(freq: parseU32(idFreq.stringValue)), "revive: read id")
+    }
+    var reviveActive = false
+    var reviveReadRetries = 0
+    func handleRevive(_ bytes: [UInt8]) {
+        if let id = recEMid(bytes) {
+            reviveActive = false
+            lfWriteId.stringValue = String(id)
+            log(String(format: "Revive: card reads id=%010llX — rewriting all LF types.", id))
+            writeLFAll(id: id)
+        } else if reviveReadRetries < 5 {
+            reviveReadRetries += 1
+            sendPayload(lfRead(freq: parseU32(idFreq.stringValue)), "revive: re-read id")
         } else {
-            let cfg = UInt32(lfConfig.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0x00148040
-            log(String(format: "T5577 write id=%010llX  w1=%08X w2=%08X cfg=%08X pwd=%@", id, w1, w2, cfg, hex(pwd)))
-            sendSeq([
-                (lfT5Write(addr: 1, word: u32be(w1), pwd: pwd, freq: freq), "T5577 block 1"),
-                (lfT5Write(addr: 2, word: u32be(w2), pwd: pwd, freq: freq), "T5577 block 2"),
-                (lfT5Write(addr: 0, word: u32be(cfg), pwd: pwd, freq: freq), "T5577 block 0 (config)"),
-                (lfRead(freq: freq), "verify read"),
-            ])
+            reviveActive = false
+            let id = parseU40(lfWriteId.stringValue)
+            if id != 0 {
+                log("Revive: card is silent — rewriting the id from the Card # field.")
+                writeLFAll(id: id)
+            } else {
+                log("Revive: card is silent and Card # is empty. Type the target id into Card # and press Revive again.")
+            }
         }
     }
 
@@ -693,13 +735,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
         if recPhase != .idle { handleRecovery(bytes) }
         else if unlockActive { handleUnlock(bytes) }
+        else if reviveActive { handleRevive(bytes) }
         else if let want = writeExpectId, let id = recEMid(bytes) {   // verify a write actually took
             writeExpectId = nil
             if id == want {
                 log(String(format: "✓ write verified: card now reads %010llX.", id))
             } else {
                 log(String(format: "✗ write did NOT take: card still reads %010llX (wanted %010llX).", id, want))
-                log("  The device ACKs (02 07 00) but the chip ignored the write → this card is password-protected. Enter its write password in the Password field and write again, or run \u{201C}Unbrick T5577\u{201D} (tries Tian/19920427/Wolf/0). The write password cannot be found by reading.")
+                log("  The device ACKs (02 07 00) but the chip still reads the old id. Use \u{201C}Revive LF (rewrite)\u{201D} or \u{201C}Write all LF\u{201D} — they normalise the password and write op12+op13, which is what the original app does to write/revive a protected card.")
             }
         }
         else if let id = recEMid(bytes) { lfWriteId.stringValue = String(id) }  // Read ID → Card #
