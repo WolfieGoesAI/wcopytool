@@ -64,6 +64,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let lfProtect = NSButton(checkboxWithTitle: "Password-protect written card with password:", target: nil, action: nil)
     let lfT5Found = NSTextField(string: "00000000")   // editable: found or user-entered password
     let lfEMFound = NSTextField(string: "00000000")
+    // Unlock sweep: also try bit-reversed / byte-reversed forms of each key (125 kHz tab + HID tab).
+    let ulBitRev = NSButton(checkboxWithTitle: "bit-reversed", target: nil, action: nil)
+    let ulByteRev = NSButton(checkboxWithTitle: "byte-reversed", target: nil, action: nil)
+    let hidBitRev = NSButton(checkboxWithTitle: "bit-reversed", target: nil, action: nil)
+    let hidByteRev = NSButton(checkboxWithTitle: "byte-reversed", target: nil, action: nil)
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
     let rawFrame = NSTextField(string: "01 0F 00 00 FF 00 9A 5A A5 54 69 61 6E")
     var regFields: [UInt8: NSTextField] = [:]
@@ -299,7 +304,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ActionButton("Unlock T5577") { [weak self] in self?.unlockCard(false) },
             labeled("EM4305 Unlock Password:", field(lfEMFound, 100)),
             ActionButton("Unlock EM4305") { [weak self] in self?.unlockCard(true) }])
-        return vstack([readRow, writeRow, lfFormats, protectRow, foundRow])
+        let revRow = hstack([NSTextField(labelWithString: "Also try:"), ulBitRev, ulByteRev])
+        return vstack([readRow, writeRow, lfFormats, protectRow, foundRow, revRow])
     }
 
     // ---- Card-number formats (EM4100 / Proxmark style) ----
@@ -377,7 +383,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). Current card password: the password already on the card — needed to re-write or unprotect a card you previously locked (leave 00000000 for a blank card); it is remembered automatically after a protected write. Unlock HID identifies the card's password by testing the known keys one at a time (stopping at the one that works), reports it, and converts the card to an unprotected plain EM4100 (the 125 kHz tab's id, or 1 — a real, non-blank id so a direct HID re-write works). The found password is shown in Current card password for reference; the card itself is left unprotected. Re-write it as HID or EM afterwards. AWID 26-bit and Paradox are write-only (this reader can't read them back) but are confirmed working. (FDX-B / 134 kHz animal tags aren't supported — this copier is a 125 kHz, 3-block device.)")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         hidRefresh()
-        return vstack([head("HID Prox"), row, protRow, hidInfo, note])
+        let revRow = hstack([NSTextField(labelWithString: "Unlock HID also try:"), hidBitRev, hidByteRev])
+        return vstack([head("HID Prox"), row, protRow, revRow, hidInfo, note])
     }
     @objc func hidEdited() { hidRefresh() }
     func hidFormat() -> HIDFormat { HIDFormat(rawValue: hidFmtPop.indexOfSelectedItem) ?? .h10301 }
@@ -503,7 +510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         guard recPhase == .idle, !ulActive, !hidReadActive, !hidUlActive else { log("busy — another operation is running"); return }
         hidUlActive = true; hidUlPhase = .precheck; hidUlIdx = 0; hidUlRetries = 0; hidUlAwait = false
         hidUlFreq = parseU32(idFreq.stringValue)
-        hidUlKeys = hidUnlockKeys()
+        hidUlKeys = expandKeys(hidUnlockKeys(), bitRev: hidBitRev.state == .on, byteRev: hidByteRev.state == .on)
         hidUlEmId = currentCardId() == 0 ? UInt64(1) : currentCardId()
         hidUlMarker = hidUlEmId ^ 1                          // distinct probe id; real id restored on match
         log(String(format: "Unlock HID: identifying the card's password (testing %d key(s)), then converting to plain EM4100 id %010llX…", hidUlKeys.count, hidUlEmId))
@@ -820,6 +827,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         }
         return out
     }
+    // Expand a key list with bit-reversed / byte-reversed variants when the tab's checkboxes are on.
+    func expandKeys(_ keys: [[UInt8]], bitRev: Bool, byteRev: Bool) -> [[UInt8]] {
+        var out: [[UInt8]] = []
+        func add(_ b: [UInt8]) { if !out.contains(where: { $0 == b }) { out.append(b) } }
+        for k in keys {
+            add(k)
+            if bitRev { add(bitrev4(k)) }
+            if byteRev { add(rev4(k)) }
+        }
+        return out
+    }
     func unlockCard(_ em4305: Bool) {
         guard recPhase == .idle, !ulActive else { log("busy — another operation is running"); return }
         startUnlock(em4305)
@@ -849,7 +867,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         ulEM = em4305
         ulActive = true; ulPhase = .baseline; ulIdx = 0; ulReadRetries = 0; ulAwaitRead = false
         ulFreq = parseU32(idFreq.stringValue)
-        ulKeys = allKnownKeys()
+        ulKeys = expandKeys(allKnownKeys(), bitRev: ulBitRev.state == .on, byteRev: ulByteRev.state == .on)
         ulField().stringValue = "unlocking…"
         log("Unlock \(em4305 ? "EM4305" : "T5577"): testing \(ulKeys.count) known keys, stopping at the one that works…")
         sendPayload(lfRFConfig(freq: ulFreq), "RF config")      // gated: its reply triggers the baseline read
