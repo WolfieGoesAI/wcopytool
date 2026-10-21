@@ -272,20 +272,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                                ActionButton("Revive") { [weak self] in self?.reviveT5() }])
         // Protection for the written card: unchecked = no password; checked = set the password below
         // (blank = 00000000). The written card's config PWD bit follows this checkbox.
-        let protectRow = hstack([lfProtect, labeled("Password:", field(lfPwd, 100))])
-        // Recover an existing card's current password — read-only, never writes.
-        let findRow = hstack([NSTextField(labelWithString: "Recover current pwd:"),
-                              ActionButton("Find T5577 pwd (read)") { [weak self] in self?.findPwd(false) },
+        let protectRow = hstack([lfProtect, labeled("Write Lock Password:", field(lfPwd, 100))])
+        // EM4305 read-only recovery (only works on a read-protected EM4305; a readable card's write
+        // password can't be read-recovered — use Unlock for that).
+        let findRow = hstack([NSTextField(labelWithString: "Read-protected EM4305:"),
                               ActionButton("Find EM4305 pwd (read)") { [weak self] in self?.findPwd(true) }])
-        // Found/entered current password per chip (editable) + Unlock (rewrite id, clear protection).
+        // Unlock finds the card's current password (tries known keys + the password fields), clears
+        // it, and writes the found password into the Unlock Password field.
         let foundRow = hstack([
-            labeled("T5577 pwd:", field(lfT5Found, 100)),
+            labeled("T5577 Unlock Password:", field(lfT5Found, 100)),
             ActionButton("Unlock T5577") { [weak self] in self?.unlockCard(false) },
-            labeled("EM4305 pwd:", field(lfEMFound, 100)),
+            labeled("EM4305 Unlock Password:", field(lfEMFound, 100)),
             ActionButton("Unlock EM4305") { [weak self] in self?.unlockCard(true) }])
-        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write authenticates with the card\u{2019}s CURRENT password — the \u{201C}T5577 pwd\u{201D} / \u{201C}EM4305 pwd\u{201D} field (leave blank for an unprotected card); if it\u{2019}s wrong the write is simply rejected. Tick \u{201C}Password-protect\u{201D} to lock the written card with the Password field (blank = 00000000, config 00148050); leave it unticked to write unprotected (config 00148040). To clear an unknown password, use Unlock — it safely tries every known key and rewrites the same id. \u{201C}Find pwd\u{201D} can only recover a READ-protected card; a card that reads without a password (most T5577s) is write-protected only and its password cannot be found by reading — use Unlock instead.")
+        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write authenticates with the card\u{2019}s CURRENT password — the \u{201C}Unlock Password\u{201D} field for that chip (leave blank for an unprotected card); if it\u{2019}s wrong the write is simply rejected. Tick \u{201C}Password-protect\u{201D} to lock the written card with the Write Lock Password (blank = 00000000, config 00148050); leave it unticked to write unprotected (config 00148040). Unlock finds the password by trying every known key plus the two password fields, clears it, and fills the found value into the Unlock Password field.")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), dev, readRow, writeRow, protectRow, findRow, foundRow, warn])
+        return vstack([head("125 kHz ID"), dev, readRow, writeRow, protectRow, foundRow, findRow, warn])
     }
 
     // Send a timed sequence so the reader isn't overrun; replies arrive via the input callback.
@@ -532,8 +533,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func allKnownKeys() -> [[UInt8]] {
         var out: [[UInt8]] = []
         func add(_ b: [UInt8]) { if !out.contains(where: { $0 == b }) { out.append(b) } }
-        let typed = fieldKey((unlockEM ? lfEMFound : lfT5Found).stringValue)   // only a clean 8-hex value
+        let typed = fieldKey((unlockEM ? lfEMFound : lfT5Found).stringValue)   // the Unlock Password field
         if typed != [0,0,0,0] { add(typed) }
+        let wlp = fieldKey(lfPwd.stringValue)           // also try the Write Lock Password field
+        if wlp != [0,0,0,0] { add(wlp) }
         add(keyBytes("5469616E"))                       // "Tian" — the app's default, by far the most common
         for k in kT5NormalizeKeys { add(keyBytes(k)) }
         for k in kLFKeyDict { add(keyBytes(k)) }
