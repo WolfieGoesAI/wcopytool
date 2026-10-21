@@ -179,11 +179,22 @@ class UsbReader(private val mgr: UsbManager) {
         }
         log("not found in ${keys.size} keys"); return "not found"
     }
-    // Clear the password and rewrite the id UNPROTECTED by reusing the proven writeCard path,
-    // authenticating with the found key (foundKey = 0 when the card was already open).
+    // Leave the card UNPROTECTED. Block 7 is already 0 (cleared during the probe with the found key),
+    // so authenticate with password 0 (op13) to write block 0 = 00148040 which clears the PWD bit, then
+    // reassert/restore with op12. This exact sequence is the one confirmed to leave the card open.
     private fun restoreT5(id: Long, foundKey: IntArray, freq: Long, log: (String) -> Unit) {
         val (w1, w2) = Proto.em4100Words(id)
-        writeCard(longArrayOf(w1, w2), 0x00148040L, false, "00000000", Proto.hexJoin(foundKey), freq, log)
+        val z = intArrayOf(0, 0, 0, 0)
+        val open = Proto.u32be(0x00148040L)
+        sendSeq(listOf(
+            Proto.lfT5Write(7, z, z, freq),                  // block 7 = 0 (auth 0)
+            Proto.lfT5Write(0, open, z, freq),               // block 0 = 00148040 (auth 0) — clears PWD bit
+            Proto.lfT5WriteNoPwd(0, open, freq),             // reassert config (op12, now open)
+            Proto.lfT5Write(1, Proto.u32be(w1), z, freq), Proto.lfT5WriteNoPwd(1, Proto.u32be(w1), freq),
+            Proto.lfT5Write(2, Proto.u32be(w2), z, freq), Proto.lfT5WriteNoPwd(2, Proto.u32be(w2), freq),
+            Proto.lfModeCmd(0x05, freq)
+        )) {}
+        log("restore: rewrote id=%010X unprotected".format(id))
     }
 
     // ---- HID unlock → convert to plain EM4100, identifying the password ----

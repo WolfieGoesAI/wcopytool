@@ -13,7 +13,10 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material3.*
 import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.*
@@ -273,9 +276,17 @@ class MainActivity : ComponentActivity() {
         }
     }
     @Composable fun LogTab(lines: SnapshotStateList<String>) {
-        Column {
-            Row { TextButton(onClick = { lines.clear() }) { Text("Clear log") } }
-            Text(lines.joinToString("\n"), fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        val clip = LocalClipboardManager.current
+        val text = lines.joinToString("\n")
+        Column(Modifier.fillMaxSize()) {
+            Row {
+                TextButton(onClick = { clip.setText(AnnotatedString(text)) }) { Text("Copy all") }
+                TextButton(onClick = { lines.clear() }) { Text("Clear log") }
+            }
+            // SelectionContainer lets the user long-press to select and copy any part of the log.
+            SelectionContainer(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                Text(text, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            }
         }
     }
     // Populate a recovered-password field from an unlock result (8-hex key, or 0 when unprotected).
