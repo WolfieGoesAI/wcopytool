@@ -343,20 +343,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         return (h.count == 8 && h.allSatisfy { $0.isHexDigit }) ? keyBytes(h) : [0,0,0,0]
     }
 
-    // T5577 write. Authenticates ONLY with the current password in the "T5577 pwd" field (empty =
-    // unprotected). Sets the new password to the "Password" field when the protect checkbox is
-    // ticked, else leaves the card unprotected. No key sweep — to clear an unknown password, use
-    // Unlock T5577 first. If the auth password is wrong the writes are rejected and the card is
-    // unchanged.
+    // Current-password candidates for a Write: the Unlock Password field, and 0 (unprotected / just
+    // unlocked). Per the rule "write a non-protected card OR use the field password" — exactly these
+    // two, deduped. NOT a full sweep (that's Unlock's job).
+    func writeAuthCands(_ field: NSTextField) -> [[UInt8]] {
+        var c: [[UInt8]] = [fieldKey(field.stringValue)]
+        if !c.contains([0,0,0,0]) { c.append([0,0,0,0]) }
+        return c
+    }
+    // T5577 write. Authenticates with the T5577 Unlock Password field OR 0 (unprotected). Sets the
+    // new password to the Write Lock Password when the checkbox is ticked, else leaves it unprotected.
+    // If neither candidate is the card's real password the writes are rejected and the card is unchanged.
     func t5577Seq(id: UInt64) -> [([UInt8], String)] {
         let freq = parseU32(idFreq.stringValue)
         let (w1, w2) = em4100Words(id)
-        let authPwd = fieldKey(lfT5Found.stringValue)   // current password (to write a protected card)
         let setPwd = targetPwd()                         // new password to set
         let cfg: [UInt8] = protectOn() ? [0x00,0x14,0x80,0x50] : [0x00,0x14,0x80,0x40]
         var seq: [([UInt8], String)] = []
-        // Change the password first (block 7), authenticating with the current password.
-        seq.append((lfT5Write(addr: 7, word: setPwd, pwd: authPwd, freq: freq), "block7 = new pwd (auth \(hex(authPwd)))"))
+        // Change the password (block 7) to the new value, authenticating with each candidate.
+        for c in writeAuthCands(lfT5Found) {
+            seq.append((lfT5Write(addr: 7, word: setPwd, pwd: c, freq: freq), "block7 = new pwd (auth \(hexJoin(c)))"))
+        }
         // Then write data + config, authenticating with the (now) new password.
         for (blk, data, name) in [(UInt8(1), u32be(w1), "block1"), (2, u32be(w2), "block2"), (0, cfg, "block0 cfg")] {
             seq.append((lfT5WriteNoPwd(addr: blk, word: data, freq: freq), "\(name) op12"))
@@ -364,16 +371,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         }
         return seq
     }
-    // EM4305 write. Authenticates with the "EM4305 pwd" field (empty = unprotected), sets the new
-    // password from the Password field when the checkbox is ticked, else leaves it unprotected.
+    // EM4305 write. Authenticates with the EM4305 Unlock Password field OR 0, sets the new password
+    // from the Write Lock Password when the checkbox is ticked, else leaves it unprotected.
     func em4305Seq(id: UInt64) -> [([UInt8], String)] {
         let freq = parseU32(idFreq.stringValue)
         let (w1, w2) = em4100Words(id)
-        let authPwd = fieldKey(lfEMFound.stringValue)
         let setPwd = targetPwd()
         var seq: [([UInt8], String)] = []
-        seq.append((em4305LoginBytes(pwd: authPwd, freq: freq), "login (current \(hex(authPwd)))"))
-        seq.append((em4305WriteWord(addr: 2, bytes: setPwd, freq: freq), "word2 = new pwd"))
+        // Set word2 = new password, authenticating (login) with each candidate current password.
+        for c in writeAuthCands(lfEMFound) {
+            seq.append((em4305LoginBytes(pwd: c, freq: freq), "login (current \(hexJoin(c)))"))
+            seq.append((em4305WriteWord(addr: 2, bytes: setPwd, freq: freq), "word2 = new pwd"))
+        }
+        // Log in with the new password and write data + config.
         seq.append((em4305LoginBytes(pwd: setPwd, freq: freq), "login (new pwd)"))
         seq.append((em4305WriteWord(addr: 5, bytes: u32be(w1), freq: freq), "word5 data1"))
         seq.append((em4305WriteWord(addr: 6, bytes: u32be(w2), freq: freq), "word6 data2"))
