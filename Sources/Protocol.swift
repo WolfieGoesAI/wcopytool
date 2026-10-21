@@ -309,6 +309,9 @@ func em4305LoginBytes(pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
 // FSK2a, RF/50, 3 data blocks. HID data lives in blocks 1,2,3.
 let kT5HIDConfigWire: [UInt8] = [0x00,0x10,0x70,0x60]
 
+// HID card formats this app supports.
+enum HIDFormat: Int { case h10301 = 0, h10304 = 1 }   // 26-bit, 37-bit
+
 // 26-bit HID (H10301) Wiegand: even parity | 8-bit facility | 16-bit card | odd parity.
 func hidWiegand26(_ fc: UInt32, _ cn: UInt32) -> UInt32 {
     let f = fc & 0xFF, c = cn & 0xFFFF
@@ -319,36 +322,72 @@ func hidWiegand26(_ fc: UInt32, _ cn: UInt32) -> UInt32 {
     return (ep << 25) | (f << 17) | (c << 1) | op
 }
 
-// 26-bit HID (H10301) → three T5577 data blocks (blocks 1,2,3), VERIFIED byte-for-byte against a
-// capture of the original app (FC=123,CN=12345 → 1D555955 5565AA69 69556A5A).
-// Layout: 8-bit FSK preamble 00011101, then Manchester (0→01, 1→10) of
-//   [17-bit lead 00000010000000000] + [sentinel 1] + [26-bit Wiegand]  = 8 + 44*2 = 96 bits.
-func hidT5Blocks26(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
-    let w = hidWiegand26(fc, cn)
-    var logical: [Int] = []
-    for ch in "00000010000000000" { logical.append(ch == "1" ? 1 : 0) }   // 17-bit lead
-    logical.append(1)                                                      // sentinel
-    for i in stride(from: 25, through: 0, by: -1) { logical.append(Int((w >> UInt32(i)) & 1)) }
+// 37-bit HID (H10304): even parity | 16-bit facility | 19-bit card | odd parity.
+// EP = even parity over the top 18 data bits, OP = odd parity over the bottom 18.
+// VERIFIED against a capture: FC=1234,CN=123456 → V=0x104D23C481.
+func hidWiegand37(_ fc: UInt32, _ cn: UInt32) -> UInt64 {
+    let f = UInt64(fc & 0xFFFF), c = UInt64(cn & 0x7FFFF)
+    let frame = (f << 20) | (c << 1)                     // bits 35..1 (data)
+    let top18 = (frame >> 19) & 0x3FFFF                  // bits 36..19
+    let bot18 = (frame >> 1) & 0x3FFFF                   // bits 18..1
+    let ep = UInt64(top18.nonzeroBitCount % 2)           // even parity → bit 36
+    let op = UInt64((bot18.nonzeroBitCount + 1) % 2)     // odd parity  → bit 0
+    return (ep << 36) | frame | op
+}
+
+// Build the device "value" V (the 44-bit logical payload, right-aligned) for a format + FC/CN.
+// 26-bit: a 0x20 lead marker (bit 37) + sentinel (bit 26) + 26-bit Wiegand.
+// 37-bit: the 37-bit Wiegand frame itself (leading parity sits at bit 36).
+func hidValue(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> UInt64 {
+    switch fmt {
+    case .h10301: return 0x2000000000 | (UInt64(1) << 26) | UInt64(hidWiegand26(fc, cn))
+    case .h10304: return hidWiegand37(fc, cn)
+    }
+}
+
+// Encode a device value V → three T5577 data blocks (blocks 1,2,3). VERIFIED byte-for-byte for both
+// 26-bit (V=0x2004F66073 → 1D555955 5565AA69 69556A5A) and 37-bit (V=0x104D23C481 → 1D555655
+// 65A6595A A5659556). Layout: 8-bit FSK preamble 00011101, then Manchester (0→01, 1→10) of V as a
+// 44-bit value (MSB first) = 8 + 44*2 = 96 bits.
+func hidT5BlocksV(_ V: UInt64) -> [UInt32] {
     var bits: [Int] = [0,0,0,1,1,1,0,1]                                    // 8-bit preamble
-    for b in logical { bits += (b == 0) ? [0,1] : [1,0] }                  // Manchester
+    for i in stride(from: 43, through: 0, by: -1) {
+        let b = Int((V >> UInt64(i)) & 1)
+        bits += (b == 0) ? [0,1] : [1,0]                                   // Manchester
+    }
     var out = [UInt32](repeating: 0, count: 3)
     for (i, bit) in bits.enumerated() { out[i/32] = (out[i/32] << 1) | UInt32(bit) }
     return out
 }
-// HID read command (confirmed): FF 00 6A 01 00 08 → reply payload [0]=0x07 (HID), value in [4...].
+// Convenience: 26-bit blocks straight from FC/CN (kept for existing call sites).
+func hidT5Blocks26(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
+    return hidT5BlocksV(hidValue(.h10301, fc, cn))
+}
+
+// HID read command (confirmed): FF 00 6A 01 00 08 → reply payload [0]=0x07 (HID), value in [3...].
 func hidReadCmd() -> [UInt8] { [0xFF, 0x00, 0x6A, 0x01, 0x00, 0x08] }
-// Decode a type-0x07 HID reply payload → (raw value, bit length, FC, CN). The value's highest set
-// bit is the HID format sentinel; the bits below it are the Wiegand frame.
-func hidDecodeReply(_ p: [UInt8]) -> (raw: UInt64, bits: Int, fc: UInt32, cn: UInt32)? {
-    guard p.count >= 5, p[0] == 0x07 else { return nil }
+// Decode a type-0x07 HID reply payload → (value, format, FC, CN). The 5-byte value at p[3...] is
+// the device value V; its highest set bit selects the format (bit 37 → H10301, bit 36 → H10304).
+// VERIFIED: 07 01 00 20 04 F6 60 73 → 26-bit FC=123/CN=12345; 07 01 00 10 4D 23 C4 81 → 37-bit
+// FC=1234/CN=123456.
+func hidDecodeReply(_ p: [UInt8]) -> (raw: UInt64, fmt: HIDFormat?, fc: UInt32, cn: UInt32)? {
+    guard p.count >= 8, p[0] == 0x07 else { return nil }
     var raw: UInt64 = 0
-    for b in p[4...] { raw = (raw << 8) | UInt64(b) }
+    for b in p[3...7] { raw = (raw << 8) | UInt64(b) }   // 5-byte value V
     guard raw != 0 else { return nil }
-    let h = 63 - raw.leadingZeroBitCount                 // sentinel = highest set bit → format length
-    let frame = raw & ((UInt64(1) << UInt64(h)) - 1)     // Wiegand frame (sentinel stripped)
-    var fc: UInt32 = 0, cn: UInt32 = 0
-    if h == 26 { fc = UInt32((frame >> 17) & 0xFF); cn = UInt32((frame >> 1) & 0xFFFF) }
-    return (raw, h, fc, cn)
+    let h = 63 - raw.leadingZeroBitCount                 // highest set bit → format selector
+    var fmt: HIDFormat? = nil, fc: UInt32 = 0, cn: UInt32 = 0
+    switch h {
+    case 37:                                             // H10301 (26-bit)
+        fmt = .h10301
+        let frame = raw & 0x3FFFFFF                      // low 26 bits = Wiegand frame
+        fc = UInt32((frame >> 17) & 0xFF); cn = UInt32((frame >> 1) & 0xFFFF)
+    case 36:                                             // H10304 (37-bit)
+        fmt = .h10304
+        fc = UInt32((raw >> 20) & 0xFFFF); cn = UInt32((raw >> 1) & 0x7FFFF)
+    default: break
+    }
+    return (raw, fmt, fc, cn)
 }
 
 func parseU40(_ s: String) -> UInt64 {

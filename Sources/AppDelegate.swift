@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let lfPwd = NSTextField(string: "00000000")
     let hidFC = NSTextField(string: "0")
     let hidCN = NSTextField(string: "0")
+    let hidFmtPop = NSPopUpButton()
     let hidInfo = NSTextField(wrappingLabelWithString: "")
     let hidProtect = NSButton(checkboxWithTitle: "Write-protect with password:", target: nil, action: nil)
     let hidPwd = NSTextField(string: "00000000")
@@ -358,34 +359,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func pageHID() -> NSView {
         hidFC.target = self; hidFC.action = #selector(hidEdited)
         hidCN.target = self; hidCN.action = #selector(hidEdited)
-        let row = hstack([labeled("Facility code:", field(hidFC, 80)),
+        hidFmtPop.addItems(withTitles: ["26-bit (H10301)", "37-bit (H10304)"])
+        hidFmtPop.selectItem(at: 0)
+        hidFmtPop.target = self; hidFmtPop.action = #selector(hidEdited)
+        let row = hstack([labeled("Format:", hidFmtPop),
+                          labeled("Facility code:", field(hidFC, 80)),
                           labeled("Card number:", field(hidCN, 100)),
                           ActionButton("Read HID") { [weak self] in self?.readHID() },
-                          ActionButton("Write HID 26-bit") { [weak self] in self?.writeHID() }])
+                          ActionButton("Write HID") { [weak self] in self?.writeHID() }])
         let protRow = hstack([hidProtect, field(hidPwd, 100)])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
-        let note = NSTextField(wrappingLabelWithString: "HID Prox 26-bit (H10301) on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read returns the card's FC/CN. 27/34/35/37-bit, AWID, FDX-B and Paradox follow once captured.")
+        let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). AWID, FDX-B and Paradox follow once captured.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         hidRefresh()
-        return vstack([head("HID Prox 26-bit (H10301)"), row, protRow, hidInfo, note])
+        return vstack([head("HID Prox"), row, protRow, hidInfo, note])
     }
     @objc func hidEdited() { hidRefresh() }
+    func hidFormat() -> HIDFormat { HIDFormat(rawValue: hidFmtPop.indexOfSelectedItem) ?? .h10301 }
     func hidRefresh() {
         let fc = parseU32(hidFC.stringValue), cn = parseU32(hidCN.stringValue)
-        let w = hidWiegand26(fc, cn)
-        let b = hidT5Blocks26(fc, cn)
+        let fmt = hidFormat()
+        let V = hidValue(fmt, fc, cn)
+        let b = hidT5BlocksV(V)
+        let name = fmt == .h10301 ? "H10301 (26-bit)" : "H10304 (37-bit)"
         hidInfo.stringValue = String(format:
-            "Wiegand 26 : %07X   (FC %u, CN %u)\nT55x7 cfg  : 00107060   blk1 %08X  blk2 %08X  blk3 %08X",
-            w, fc, cn, b[0], b[1], b[2])
+            "%@  value %llX   (FC %u, CN %u)\nT55x7 cfg  : 00107060   blk1 %08X  blk2 %08X  blk3 %08X",
+            name, V, fc, cn, b[0], b[1], b[2])
     }
     func writeHID() {
         guard recPhase == .idle, !ulActive, !hidReadActive else { log("busy — another operation is running"); return }
         let fc = parseU32(hidFC.stringValue), cn = parseU32(hidCN.stringValue)
         let freq = parseU32(idFreq.stringValue)
-        let data = hidT5Blocks26(fc, cn)
+        let fmt = hidFormat()
+        let data = hidT5BlocksV(hidValue(fmt, fc, cn))
         let protect = hidProtect.state == .on
         let setPwd = protect ? fieldKey(hidPwd.stringValue) : [0,0,0,0]
-        log(String(format: "HID 26-bit write FC=%u CN=%u → blocks %08X %08X %08X, config %@", fc, cn, data[0], data[1], data[2], protect ? "00107070 (locked)" : "00107060"))
+        log(String(format: "HID %@ write FC=%u CN=%u → blocks %08X %08X %08X, config %@", fmt == .h10301 ? "26-bit" : "37-bit", fc, cn, data[0], data[1], data[2], protect ? "00107070 (locked)" : "00107060"))
         var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config")]
         // Authenticate with the current password (Unlock field, 0, or the known keys) and set block 7.
         var cands = writeAuthCands(lfT5Found)
@@ -414,10 +423,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
     func handleHIDRead(_ bytes: [UInt8]) {
         guard let (p, _, _, _) = Frame.parse(bytes) else { return }
-        if let r = hidDecodeReply(p), r.bits == 26 {
+        if let r = hidDecodeReply(p), let fmt = r.fmt {
             hidReadActive = false
+            hidFmtPop.selectItem(at: fmt.rawValue)
             hidFC.stringValue = String(r.fc); hidCN.stringValue = String(r.cn); hidRefresh()
-            log(String(format: "✓ HID read: FC=%u CN=%u  (raw %llX, %d-bit)", r.fc, r.cn, r.raw, r.bits))
+            let bits = fmt == .h10301 ? 26 : 37
+            log(String(format: "✓ HID read: FC=%u CN=%u  (raw %llX, %d-bit)", r.fc, r.cn, r.raw, bits))
         } else if hidReadRetries < 8 {
             hidReadRetries += 1
             afterDelay(0.2) { [weak self] in self?.sendPayload(hidReadCmd(), "read HID") }
