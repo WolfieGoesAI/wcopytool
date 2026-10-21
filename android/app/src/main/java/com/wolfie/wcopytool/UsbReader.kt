@@ -79,9 +79,13 @@ class UsbReader(private val mgr: UsbManager) {
     // ---- read ----
     fun readEMId(freq: Long): Long? {
         transact(Proto.lfRFConfig(freq)); Thread.sleep(120)   // let the RF field stabilise before reading
+        transact(Proto.lfModeCmd(0x05, freq)); Thread.sleep(40)   // bracket reads with mode 0x05 (as the Mac app does)
         for (i in 0 until 10) { Proto.recEMid(transact(Proto.lfRead(freq)))?.let { return it }; Thread.sleep(60) }
         return null
     }
+    // The Mac app brackets writes with mode 0x14; sending it before a write burst keeps the card in the
+    // write/program state so the following block writes commit reliably.
+    private fun writeMode(freq: Long) { transact(Proto.lfModeCmd(0x14, freq)); wset() }
     fun readHID(freq: Long): Proto.HidRead? {
         transact(Proto.lfRFConfig(freq))
         for (i in 0 until 8) { val r = Proto.hidDecode(transact(Proto.hidReadCmd())); if (r?.fmt != null) return r; Thread.sleep(40) }
@@ -101,6 +105,7 @@ class UsbReader(private val mgr: UsbManager) {
         log("write ${dataBlocks.size} blocks, config ${Proto.hexJoin(cfg)}")
         val seq = ArrayList<IntArray>()
         seq.add(Proto.lfRFConfig(freq))
+        seq.add(Proto.lfModeCmd(0x14, freq))   // bracket the write burst with mode 0x14 (as the Mac app does)
         for (c in b7) seq.add(Proto.lfT5Write(7, setPwd, c, freq))
         val blocks = ArrayList<Pair<Int, IntArray>>()
         dataBlocks.forEachIndexed { i, w -> blocks.add((i + 1) to Proto.u32be(w)) }
@@ -172,6 +177,7 @@ class UsbReader(private val mgr: UsbManager) {
         transact(Proto.lfRFConfig(freq)); Thread.sleep(150)
         var opened = false
         for (attempt in 0 until 4) {
+            writeMode(freq)
             writeCommit(Proto.lfT5Write(7, z, z, freq))   // warm-up; no-op on an open card, rejected on a protected one
             writeCommit(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
             writeCommit(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
@@ -186,6 +192,7 @@ class UsbReader(private val mgr: UsbManager) {
             // Clear block 7 with the candidate, then write the marker with password 0 — only the real
             // password lets block 7 clear, so only then does the pwd-0 marker write take. Each write is
             // committed twice with full settle so a dropped first attempt still lands.
+            writeMode(freq)
             writeCommit(Proto.lfT5Write(7, z, k, freq))
             writeCommit(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
             writeCommit(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
@@ -205,6 +212,7 @@ class UsbReader(private val mgr: UsbManager) {
         val (w1, w2) = Proto.em4100Words(id)
         val z = intArrayOf(0, 0, 0, 0)
         val open = Proto.u32be(0x00148040L)
+        writeMode(freq)
         writeCommit(Proto.lfT5Write(7, z, z, freq))      // block 7 = 0 (auth 0)
         writeCommit(Proto.lfT5Write(0, open, z, freq))   // block 0 = 00148040 (auth 0) clears PWD bit
         transact(Proto.lfT5WriteNoPwd(0, open, freq)); wset() // reassert config (op12)
