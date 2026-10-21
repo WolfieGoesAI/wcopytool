@@ -113,32 +113,38 @@ class MainActivity : ComponentActivity() {
         val id = remember { mutableStateOf("0") }
         val protect = remember { mutableStateOf(false) }
         val pwd = remember { mutableStateOf("00000000") }
-        val cur = remember { mutableStateOf("00000000") }
+        val t5Pwd = remember { mutableStateOf("00000000") }
+        val emPwd = remember { mutableStateOf("00000000") }
         val bitRev = remember { mutableStateOf(false) }
         val byteRev = remember { mutableStateOf(false) }
         val f = 125000L
+        fun applyFound(field: MutableState<String>, res: String) {
+            if (res.length == 8 && res.all { it.isDigit() || it in 'A'..'F' }) field.value = res
+            else if (res == "no password") field.value = "00000000"
+        }
         Column {
             HexField("Card number (decimal)", id)
             Row { Btn("Read ID") { go { val v = reader.readEMId(f); if (v != null) { id.value = v.toString(); log("✓ ID $v") } else log("✗ no card") } } }
             Row {
                 Btn("Write T5577") { go {
                     val (w1, w2) = Proto.em4100Words(Fmt.parseDecId(id.value))
-                    reader.writeCard(longArrayOf(w1, w2), 0x00148040L, protect.value, pwd.value, cur.value, f, ::log)
+                    reader.writeCard(longArrayOf(w1, w2), 0x00148040L, protect.value, pwd.value, t5Pwd.value, f, ::log)
                 } }
                 Spacer(Modifier.width(8.dp))
-                Btn("Write EM4305") { go { reader.writeEM4305(Fmt.parseDecId(id.value), protect.value, pwd.value, cur.value, f, ::log) } }
+                Btn("Write EM4305") { go { reader.writeEM4305(Fmt.parseDecId(id.value), protect.value, pwd.value, emPwd.value, f, ::log) } }
             }
             CheckRow("Password-protect with password:", protect); if (protect.value) HexField("New password", pwd)
-            HexField("Current card password", cur)
+            HexField("T5577 Unlock Password", t5Pwd)
+            HexField("EM4305 Unlock Password", emPwd)
             Row {
                 Btn("Unlock T5577") { go {
-                    val keys = reader.expandKeys(unlockKeys(keyText.value, cur.value, false), bitRev.value, byteRev.value)
-                    reader.unlockT5577(keys, f, ::log)
+                    val keys = reader.expandKeys(unlockKeys(keyText.value, t5Pwd.value, false), bitRev.value, byteRev.value)
+                    applyFound(t5Pwd, reader.unlockT5577(keys, f, ::log))
                 } }
                 Spacer(Modifier.width(8.dp))
                 Btn("Unlock EM4305") { go {
-                    val keys = reader.expandKeys(unlockKeys(keyText.value, cur.value, true), bitRev.value, byteRev.value)
-                    reader.unlockEM4305(keys, f, ::log)
+                    val keys = reader.expandKeys(unlockKeys(keyText.value, emPwd.value, true), bitRev.value, byteRev.value)
+                    applyFound(emPwd, reader.unlockEM4305(keys, f, ::log))
                 } }
             }
             RevRow("Unlock also try:", bitRev, byteRev)
