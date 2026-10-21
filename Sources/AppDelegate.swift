@@ -357,14 +357,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var recOrig: UInt64 = 0
     var recMarker: UInt64 = 0
     var recFreq: UInt32 = 125000
-    // Reply-tracking so the sweep never stalls when a read comes back as a no-card status (02 07).
-    var recPendingWrites = 0   // write replies still expected in the current batch
+    // Reply-gated sequencing: each command is sent only after the previous one's reply arrives,
+    // so a slow T5577 write finishes before the next command (no fixed-timer hammering).
+    var recWriteQueue: [([UInt8],String)] = []  // writes left to send for the current candidate
     var recAwaitVerify = false // waiting for the verify read's reply
     var recVerifyRetries = 0
     var recReadRetries = 0
     var recConfirming = false  // second read to confirm a marker hit (guards read noise)
     var recSamples: [UInt64] = []   // initial reads, to learn which bits flicker
     var recStableMask: UInt64 = 0   // bits the card reads consistently
+    let recSettle = 0.25            // pause after writes before reading back (let the card commit)
+    let recStepGap = 0.06           // small pause between reply-gated commands
+
+    func afterDelay(_ d: Double, _ f: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + d, execute: f) }
 
     // A read indicates the marker was written iff it matches on every stable bit.
     func recMatchesMarker(_ id: UInt64) -> Bool { (id & recStableMask) == (recMarker & recStableMask) }
@@ -382,21 +387,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         guard let (p, _, _, _) = Frame.parse(bytes), p.count == 6, p[0] == 0x05 else { return nil }
         return p[1...5].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
     }
-    // Send only the write commands for a candidate; the verify read is issued once they're acked.
+    // Build the write list for a candidate and start stepping through it (reply-gated).
     func recSendWrites(id: UInt64, key: [UInt8], label: String) {
         let (w1, w2) = em4100Words(id)
-        var seq: [([UInt8],String)] = []
         if recEM {
-            seq.append((em4305LoginBytes(pwd: key, freq: recFreq), "login \(label)"))
-            seq.append((em4305WriteWord(addr: 5, bytes: u32be(w1), freq: recFreq), "w5"))
-            seq.append((em4305WriteWord(addr: 6, bytes: u32be(w2), freq: recFreq), "w6"))
+            recWriteQueue = [
+                (em4305LoginBytes(pwd: key, freq: recFreq), "login \(label)"),
+                (em4305WriteWord(addr: 5, bytes: u32be(w1), freq: recFreq), "w5"),
+                (em4305WriteWord(addr: 6, bytes: u32be(w2), freq: recFreq), "w6"),
+            ]
         } else {
-            seq.append((lfT5Write(addr: 1, word: u32be(w1), pwd: key, freq: recFreq), "blk1 \(label)"))
-            seq.append((lfT5Write(addr: 2, word: u32be(w2), pwd: key, freq: recFreq), "blk2"))
+            recWriteQueue = [
+                (lfT5Write(addr: 1, word: u32be(w1), pwd: key, freq: recFreq), "blk1 \(label)"),
+                (lfT5Write(addr: 2, word: u32be(w2), pwd: key, freq: recFreq), "blk2"),
+            ]
         }
-        recPendingWrites = seq.count
         recAwaitVerify = false; recConfirming = false
-        sendSeq(seq, gap: 0.12)
+        recStep()
+    }
+    // Send the next queued write, or (queue empty) the verify read after a settle pause.
+    func recStep() {
+        if !recWriteQueue.isEmpty {
+            let cmd = recWriteQueue.removeFirst()
+            afterDelay(recStepGap) { [weak self] in self?.sendPayload(cmd.0, cmd.1) }
+        } else {
+            recAwaitVerify = true; recVerifyRetries = 0
+            afterDelay(recSettle) { [weak self] in guard let s = self else { return }
+                s.sendPayload(lfRead(freq: s.recFreq), "verify") }
+        }
     }
     func tryRecCandidate() {
         guard recIdx < recCands.count else {
@@ -424,7 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                    (lfT5Write(addr: 2, word: u32be(w2), pwd: key, freq: recFreq), "blk2"),
                    (lfRead(freq: recFreq), "read")]
         }
-        sendSeq(seq, gap: 0.12)
+        sendSeq(seq, gap: 0.3)
     }
     func handleRecovery(_ bytes: [UInt8]) {
         let emid = recEMid(bytes)
@@ -462,34 +480,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                 recPhase = .idle
             }
         case .verify:
-            if recPendingWrites > 0 {            // count write acks (any reply), ignore content
-                recPendingWrites -= 1
-                if recPendingWrites == 0 {       // writes done → issue the verify read
-                    recAwaitVerify = true; recVerifyRetries = 0
-                    sendPayload(lfRead(freq: recFreq), "verify")
-                }
+            if !recAwaitVerify {                 // a write was just acked → send the next command
+                recStep()
                 return
             }
-            if recAwaitVerify {
-                if let id = emid {
-                    if recMatchesMarker(id) {
-                        if recConfirming {                 // confirmed twice → real hit
-                            recAwaitVerify = false; recConfirming = false; recFound()
-                        } else {                            // first hit → read again to confirm
-                            recConfirming = true
-                            sendPayload(lfRead(freq: recFreq), "confirm")
-                        }
-                    } else {                                // not the marker → wrong key
-                        recAwaitVerify = false; recConfirming = false
-                        recIdx += 1; tryRecCandidate()
+            if let id = emid {
+                if recMatchesMarker(id) {
+                    if recConfirming {                 // confirmed twice → real hit
+                        recAwaitVerify = false; recConfirming = false; recFound()
+                    } else {                            // first hit → read again to confirm
+                        recConfirming = true
+                        afterDelay(recStepGap) { [weak self] in guard let s = self else { return }
+                            s.sendPayload(lfRead(freq: s.recFreq), "confirm") }
                     }
-                } else if recVerifyRetries < 3 {            // no-card read → retry a few times
-                    recVerifyRetries += 1
-                    sendPayload(lfRead(freq: recFreq), "verify retry")
-                } else {
+                } else {                                // not the marker → wrong key, next candidate
                     recAwaitVerify = false; recConfirming = false
                     recIdx += 1; tryRecCandidate()
                 }
+            } else if recVerifyRetries < 4 {            // no-card read → retry a few times
+                recVerifyRetries += 1
+                afterDelay(recSettle) { [weak self] in guard let s = self else { return }
+                    s.sendPayload(lfRead(freq: s.recFreq), "verify retry") }
+            } else {
+                recAwaitVerify = false; recConfirming = false
+                recIdx += 1; tryRecCandidate()
             }
         case .idle:
             break
@@ -560,7 +574,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                 (lfRead(freq: freq), "verify read"),
             ]
         }
-        sendSeq(seq, gap: 0.15)
+        sendSeq(seq, gap: 0.3)
     }
 
     func pageConfig() -> NSView {
