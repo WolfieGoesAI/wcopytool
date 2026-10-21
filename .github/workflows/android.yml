@@ -20,10 +20,27 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Accept licenses and install SDK packages
+      - name: Set up Android SDK packages
         run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          set -e
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/android-sdk}}"
+          echo "Using SDK at: $SDK"
+          SM="$(command -v sdkmanager || true)"
+          if [ -z "$SM" ] && [ -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then SM="$SDK/cmdline-tools/latest/bin/sdkmanager"; fi
+          if [ -z "$SM" ]; then SM="$(find "$SDK" -name sdkmanager -type f 2>/dev/null | head -1 || true)"; fi
+          if [ -z "$SM" ]; then
+            echo "cmdline-tools not found — installing"
+            mkdir -p "$SDK/cmdline-tools"
+            curl -sSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdtools.zip
+            unzip -q /tmp/cmdtools.zip -d "$SDK/cmdline-tools"
+            mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
+            SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          echo "sdkmanager: $SM"
+          yes | "$SM" --sdk_root="$SDK" --licenses >/dev/null 2>&1 || true
+          "$SM" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
