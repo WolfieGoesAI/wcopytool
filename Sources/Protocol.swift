@@ -262,6 +262,32 @@ let kT5NormalizeKeys = ["C0F5009A","00000000","19920427","1C0B5848","5469616E"]
 // EM4305 login passwords the app tries before setting word2 = "Tian" (wire bytes from the capture:
 // 00000000 and 05 d7 3b 9f = LE of 0x9F3BD705).
 let kEM4305NormalizeKeys = ["00000000","05D73B9F"]
+
+// The default known-password list (wire bytes, upper-case, deduped), most-likely first. The
+// Passwords tab seeds its editable list from this; Unlock/Write use whatever the tab holds.
+func defaultLFKeys() -> [String] {
+    var out: [String] = []; var seen = Set<String>()
+    for k in (["5469616E"] + kT5NormalizeKeys + kLFKeyDict) {
+        let u = k.uppercased()
+        if !seen.contains(u) { seen.insert(u); out.append(u) }
+    }
+    return out
+}
+// Reverse all 32 bits of a 4-hex-byte password (its "binary mirror"). "----" if not 8 hex digits.
+func bitReverse32Hex(_ hex: String) -> String {
+    let h = hex.trimmingCharacters(in: .whitespaces)
+    guard h.count == 8, let v = UInt32(h, radix: 16) else { return "----" }
+    var x = v, r: UInt32 = 0
+    for _ in 0..<32 { r = (r << 1) | (x & 1); x >>= 1 }
+    return String(format: "%08X", r)
+}
+// Reverse the byte order of a 4-hex-byte password.
+func byteReverseHex(_ hex: String) -> String {
+    let h = hex.trimmingCharacters(in: .whitespaces)
+    guard h.count == 8 else { return "----" }
+    let b = pad4(parseHexBlob(h))
+    return b.reversed().map { String(format: "%02X", $0) }.joined()
+}
 //   T5577 block write with an explicit mode/flag byte (the byte between op 0x13 and the block
 //   number — always 0x00 in normal writes). Used by the test-mode unbrick to probe whether the
 //   firmware exposes Proxmark-style test mode / downlink waveforms (r0..r3) for block-0 recovery.

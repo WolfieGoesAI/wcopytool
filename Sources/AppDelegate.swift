@@ -35,6 +35,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let fPayload = NSTextField(labelWithString: "—"); let fAscii = NSTextField(labelWithString: "—")
     let respRaw = NSTextView()
     var logView: NSTextView!
+    // Editable known-password list (Passwords tab) used by Unlock/Write, seeded from the defaults.
+    var keyList: [String] = defaultLFKeys()
+    var pwdEditor: NSTextView!
+    var pwdMirror: NSTextView!
 
     // page input fields
     let mfKey = NSTextField(string: "FFFFFFFFFFFF")
@@ -103,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ("Sectors (Mifare)", pageSectors()),
             ("NTAG", pageNTAG()),
             ("125 kHz ID", pageID()),
+            ("Passwords", pagePasswords()),
             ("Config (RC522)", pageConfig()),
             ("Advanced", pageAdvanced()),
             ("Raw", pageRaw()),
@@ -253,10 +258,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func pageID() -> NSView {
-        let dev = hstack([
-            ActionButton("Device info (0x68)") { [weak self] in self?.sendPayload([0xFF,0x00,0x68], "device info") },
-            ActionButton("Serial number (0x69)") { [weak self] in self?.sendPayload([0xFF,0x00,0x69], "serial") },
-        ])
         // Confirmed LF read: FF 00 65 05 1E <freq> 00 00 00 00 → reply 02 0C 01 00 05 <5-byte EM id> CHK FD
         // Frequency is fixed at 125 kHz — every LF command in the original app uses it, and EM4100 /
         // T5577 are 125 kHz chips. (idFreq stays at 125000 internally.)
@@ -281,7 +282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ActionButton("Unlock EM4305") { [weak self] in self?.unlockCard(true) }])
         let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write authenticates with the card\u{2019}s CURRENT password — the \u{201C}Unlock Password\u{201D} field for that chip (leave blank for an unprotected card); if it\u{2019}s wrong the write is simply rejected. Tick \u{201C}Password-protect\u{201D} to lock the written card with the Write Lock Password (blank = 00000000, config 00148050); leave it unticked to write unprotected (config 00148040). Unlock finds the password by trying every known key plus the two password fields, clears it, and fills the found value into the Unlock Password field.")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), dev, readRow, writeRow, protectRow, foundRow, warn])
+        return vstack([head("125 kHz ID"), readRow, writeRow, protectRow, foundRow, warn])
     }
 
     // Send a timed sequence so the reader isn't overrun; replies arrive via the input callback.
@@ -507,9 +508,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         if typed != [0,0,0,0] { add(typed) }
         let wlp = fieldKey(lfPwd.stringValue)           // also try the Write Lock Password field
         if wlp != [0,0,0,0] { add(wlp) }
-        add(keyBytes("5469616E"))                       // "Tian" — the app's default, by far the most common
-        for k in kT5NormalizeKeys { add(keyBytes(k)) }
-        for k in kLFKeyDict { add(keyBytes(k)) }
+        for k in keyList where fieldKey(k) != [0,0,0,0] || k.replacingOccurrences(of: " ", with: "") == "00000000" {
+            add(keyBytes(k))                             // the editable Passwords-tab list
+        }
         return out
     }
     func unlockCard(_ em4305: Bool) {
@@ -650,6 +651,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func pageAdvanced() -> NSView {
+        let g0 = hstack([
+            ActionButton("Device info (0x68)") { [weak self] in self?.sendPayload([0xFF,0x00,0x68], "device info") },
+            ActionButton("Serial number (0x69)") { [weak self] in self?.sendPayload([0xFF,0x00,0x69], "serial") },
+        ])
         let g1 = hstack([
             ActionButton("Toggle 0x6A 01") { [weak self] in self?.sendPayload([0xFF,0x00,0x6A,0x01], "toggle") },
             ActionButton("Slot 0x6B 30") { [weak self] in self?.sendPayload([0xFF,0x00,0x6B,0x30], "slot 30") },
@@ -661,7 +666,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         ])
         let warn = NSTextField(wrappingLabelWithString: "⚠︎ The Windows app also has hidden firmware Init / Erase / flash buttons (X7V310…-74H). Their opcodes are NOT mapped and are deliberately omitted — a wrong firmware frame can brick the reader. Use the Raw page only if you know the exact bytes.")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
-        return vstack([head("Advanced / hidden control opcodes"), g1, g2, warn])
+        return vstack([head("Advanced / hidden control opcodes"), g0, g1, g2, warn])
+    }
+
+    // Editable known-password list (feeds Unlock and Write), shown with bit-reversed + byte-reversed
+    // equivalents. Edit the left box (one hex password per line), press Apply.
+    func pagePasswords() -> NSView {
+        pwdEditor = NSTextView(); let edScroll = makeTextScroll(pwdEditor, mono(11))
+        pwdEditor.isEditable = true
+        pwdEditor.string = keyList.joined(separator: "\n")
+        pwdMirror = NSTextView(); let mirScroll = makeTextScroll(pwdMirror, mono(11))
+        let apply = ActionButton("Apply list") { [weak self] in self?.applyKeyList() }
+        let reset = ActionButton("Reset to defaults") { [weak self] in guard let s = self else { return }
+            s.keyList = defaultLFKeys(); s.pwdEditor.string = s.keyList.joined(separator: "\n"); s.refreshMirror() }
+        let cols = hstack([edScroll, mirScroll])
+        NSLayoutConstraint.activate([
+            edScroll.widthAnchor.constraint(equalToConstant: 180), edScroll.heightAnchor.constraint(equalToConstant: 360),
+            mirScroll.widthAnchor.constraint(equalToConstant: 470), mirScroll.heightAnchor.constraint(equalToConstant: 360),
+        ])
+        let note = NSTextField(wrappingLabelWithString: "One hex password (8 hex digits) per line. These are the keys Unlock tries and the current-password candidates; the two Unlock Password fields and the Write Lock Password are also tried automatically. The right column shows each key with its bit-reversed (binary-mirror) and byte-reversed equivalents — T5577 and EM4305 passwords are sometimes mirrors of each other.")
+        note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
+        refreshMirror()
+        return vstack([head("Known passwords (editable)"), hstack([apply, reset]), cols, note])
+    }
+    func applyKeyList() {
+        var out: [String] = []; var seen = Set<String>()
+        for raw in pwdEditor.string.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            let h = raw.trimmingCharacters(in: .whitespaces).uppercased().replacingOccurrences(of: " ", with: "")
+            guard h.count == 8, h.allSatisfy({ $0.isHexDigit }) else { continue }
+            if !seen.contains(h) { seen.insert(h); out.append(h) }
+        }
+        keyList = out
+        log("Passwords: applied \(keyList.count) keys.")
+        refreshMirror()
+    }
+    func refreshMirror() {
+        let header = String(format: "%-10@  %-10@  %@\n", "password" as NSString, "bit-rev" as NSString, "byte-rev" as NSString)
+        var lines = [header + String(repeating: "─", count: 34)]
+        for k in keyList { lines.append(String(format: "%-10@  %-10@  %@", k as NSString, bitReverse32Hex(k) as NSString, byteReverseHex(k) as NSString)) }
+        pwdMirror.string = lines.joined(separator: "\n")
     }
 
     func pageRaw() -> NSView {
