@@ -61,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let hidProtect = NSButton(checkboxWithTitle: "Write-protect with password:", target: nil, action: nil)
     let hidPwd = NSTextField(string: "00000000")
     let hidUnlock = NSTextField(string: "00000000")   // the card's CURRENT password (for re-writing a protected card)
+    let hidAnimal = NSButton(checkboxWithTitle: "FDX-B animal flag", target: nil, action: nil)
     let lfProtect = NSButton(checkboxWithTitle: "Password-protect written card with password:", target: nil, action: nil)
     let lfT5Found = NSTextField(string: "00000000")   // editable: found or user-entered password
     let lfEMFound = NSTextField(string: "00000000")
@@ -369,8 +370,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                           ActionButton("Read HID") { [weak self] in self?.readHID() },
                           ActionButton("Write HID") { [weak self] in self?.writeHID() },
                           ActionButton("Unlock HID") { [weak self] in self?.startHIDUnlock() }])
+        hidAnimal.state = .on
+        hidAnimal.target = self; hidAnimal.action = #selector(hidEdited)
         let protRow = hstack([hidProtect, field(hidPwd, 100),
-                              labeled("Current card password:", field(hidUnlock, 100))])
+                              labeled("Current card password:", field(hidUnlock, 100)), hidAnimal])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
         let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). Current card password: the password already on the card — needed to re-write or unprotect a card you previously locked (leave 00000000 for a blank card); it is remembered automatically after a protected write. Unlock HID identifies the card's password by testing the known keys one at a time (stopping at the one that works), reports it, and converts the card to an unprotected plain EM4100 (the 125 kHz tab's id, or 1 — a real, non-blank id so a direct HID re-write works). The found password is shown in Current card password for reference; the card itself is left unprotected. Re-write it as HID or EM afterwards. AWID 26-bit, Paradox and FDX-B are write-only (this reader can't read them back). AWID and Paradox are confirmed; FDX-B is experimental — for it, the two fields mean Country code and National ID (the National ID is 38-bit, so it can be large). Verify on another reader.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
@@ -383,7 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // all others use FC/CN. Returns 3 blocks (HID/AWID/Paradox) or 4 (FDX-B).
     func lfBlocksFor(_ fmt: HIDFormat) -> [UInt32] {
         let fc = parseU32(hidFC.stringValue)
-        if fmt == .fdxb { return fdxbBlocks(country: fc, national: parseU40(hidCN.stringValue)) }
+        if fmt == .fdxb { return fdxbBlocks(country: fc, national: parseU40(hidCN.stringValue), animal: hidAnimal.state == .on) }
         return lfProxBlocks(fmt, fc, parseU32(hidCN.stringValue))
     }
     func hidFmtName(_ fmt: HIDFormat) -> String {
