@@ -495,9 +495,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             }
             if recSamples.count * 2 >= recBaselineCount {   // reads fine without a password
                 let id = recSamples.first ?? 0
-                log(String(format: "Card reads without a password (id=%010llX) — it is not read-protected.", id))
-                log("  Its WRITE password cannot be found by reading, and this tool will not write to a card to test passwords. If you know the password, type it in the field and use Unlock/Write.")
-                (recEM ? lfEMFound : lfT5Found).stringValue = "reads w/o pwd"
+                log(String(format: "Card reads without a password (id=%010llX) — it is write-protected only, not read-protected.", id))
+                log("  A write-protected card's password can't be identified by reading. But these cards use a known password set (the app's default is \u{201C}Tian\u{201D}), so press Unlock \(recEM ? "EM4305" : "T5577") to clear it — that safely tries every known key and rewrites the same id. \u{201C}Tian\u{201D} is pre-filled below as the most likely one.")
+                (recEM ? lfEMFound : lfT5Found).stringValue = "5469616E"
                 recPhase = .idle
             } else {                                         // silent without a password → read-protected
                 log("Card does not read without a password → read-protected. Sweeping \(recCands.count) candidates by \(recEM ? "login" : "password-read") (read-only)…")
@@ -529,14 +529,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // password to 0 with protection cleared, leaving the card writable without a password.
     var unlockActive = false
     var unlockEM = false
-    var unlockPwd: [UInt8] = []
     var unlockReadRetries = 0
+    // Every known password, wire-byte form, most-likely first. These are the passwords the original
+    // app and this ecosystem use, so an ecosystem card's password is almost always in here.
+    func allKnownKeys() -> [[UInt8]] {
+        var out: [[UInt8]] = []
+        func add(_ b: [UInt8]) { if !out.contains(where: { $0 == b }) { out.append(b) } }
+        let typed = (unlockEM ? lfEMFound : lfT5Found).stringValue.trimmingCharacters(in: .whitespaces)
+        if !typed.isEmpty { add(keyBytes(typed)) }
+        add(keyBytes("5469616E"))                       // "Tian" — the app's default, by far the most common
+        for k in kT5NormalizeKeys { add(keyBytes(k)) }
+        for k in kLFKeyDict { add(keyBytes(k)) }
+        return out
+    }
     func unlockCard(_ em4305: Bool) {
-        guard recPhase == .idle, !unlockActive else { log("busy — another operation is running"); return }
+        guard recPhase == .idle, !unlockActive, !reviveActive else { log("busy — another operation is running"); return }
         unlockEM = em4305
-        unlockPwd = keyBytes((em4305 ? lfEMFound : lfT5Found).stringValue)
         unlockActive = true; unlockReadRetries = 0
-        log("Unlock \(em4305 ? "EM4305" : "T5577") with pwd \(hex(unlockPwd)): reading id…")
+        log("Unlock \(em4305 ? "EM4305" : "T5577"): reading id, then clearing the password by trying every known key…")
         sendPayload(lfRead(freq: parseU32(idFreq.stringValue)), "read id")
     }
     func handleUnlock(_ bytes: [UInt8]) {
@@ -553,31 +563,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         unlockActive = false
         let freq = parseU32(idFreq.stringValue)
         let (w1, w2) = em4100Words(id)
-        let pwd = unlockPwd
-        log(String(format: "Unlock: id=%010llX — rewriting data, clearing protection + password", id))
-        var seq: [([UInt8], String)]
+        let keys = allKnownKeys()
+        writeExpectId = id; writeExpectEM = unlockEM    // verify read at the end confirms the id survived
+        log(String(format: "Unlock: id=%010llX — trying %d known keys (safe: rewrites the same id, no data change)…", id, keys.count))
+        var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config"), (lfModeCmd(0x14, freq: freq), "LF begin")]
         if unlockEM {
-            // EM4305: login, rewrite data + config, set password word2 = 0.
-            seq = [
-                (em4305LoginBytes(pwd: pwd, freq: freq), "login"),
-                (em4305WriteWord(addr: 5, bytes: u32be(w1), freq: freq), "w5 data1"),
-                (em4305WriteWord(addr: 6, bytes: u32be(w2), freq: freq), "w6 data2"),
-                (em4305WriteWord(addr: 4, bytes: kEM4305ConfigWire, freq: freq), "w4 config"),
-                (em4305WriteWord(addr: 2, bytes: [0,0,0,0], freq: freq), "w2 password=0"),
-                (lfRead(freq: freq), "verify read"),
-            ]
+            // EM4305: for each known login key, authenticate and zero the password word (word 2).
+            for k in keys {
+                seq.append((em4305LoginBytes(pwd: k, freq: freq), "login \(hex(k))"))
+                seq.append((em4305WriteWord(addr: 2, bytes: [0,0,0,0], freq: freq), "word2 = 0"))
+            }
+            // Now unprotected: rewrite data + config with password 0.
+            seq.append((em4305LoginBytes(pwd: [0,0,0,0], freq: freq), "login 0"))
+            seq.append((em4305WriteWord(addr: 5, bytes: u32be(w1), freq: freq), "w5 data1"))
+            seq.append((em4305WriteWord(addr: 6, bytes: u32be(w2), freq: freq), "w6 data2"))
+            seq.append((em4305WriteWord(addr: 4, bytes: kEM4305ConfigWire, freq: freq), "w4 config"))
         } else {
-            // T5577: rewrite data, config with PWD bit CLEAR (0x00148040), password block7 = 0 —
-            // all authenticated with the current password.
-            seq = [
-                (lfT5Write(addr: 1, word: u32be(w1), pwd: pwd, freq: freq), "block1 data1"),
-                (lfT5Write(addr: 2, word: u32be(w2), pwd: pwd, freq: freq), "block2 data2"),
-                (lfT5Write(addr: 0, word: u32be(0x00148040), pwd: pwd, freq: freq), "block0 config (PWD clear)"),
-                (lfT5Write(addr: 7, word: [0,0,0,0], pwd: pwd, freq: freq), "block7 password=0"),
-                (lfRead(freq: freq), "verify read"),
-            ]
+            // T5577: for each known key, zero the password block (7). The matching key sets it to 0;
+            // wrong keys are rejected (no change). Then clear the PWD bit and rewrite the same id — all
+            // with password 0, which now works.
+            for k in keys { seq.append((lfT5Write(addr: 7, word: [0,0,0,0], pwd: k, freq: freq), "block7 = 0 (auth \(hex(k)))")) }
+            seq.append((lfT5Write(addr: 0, word: [0x00,0x14,0x80,0x40], pwd: [0,0,0,0], freq: freq), "block0 config (PWD clear)"))
+            seq.append((lfT5Write(addr: 1, word: u32be(w1), pwd: [0,0,0,0], freq: freq), "block1 (same id)"))
+            seq.append((lfT5Write(addr: 2, word: u32be(w2), pwd: [0,0,0,0], freq: freq), "block2 (same id)"))
         }
-        sendSeq(seq, gap: 0.3)
+        seq.append((lfModeCmd(0x05, freq: freq), "LF read-mode"))
+        seq.append((lfRead(freq: freq), "verify read"))
+        sendSeq(seq, gap: 0.2)
+        (unlockEM ? lfEMFound : lfT5Found).stringValue = "swept — now pwd 0"
     }
 
     func pageConfig() -> NSView {
