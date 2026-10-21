@@ -366,10 +366,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                           labeled("Facility code:", field(hidFC, 80)),
                           labeled("Card number:", field(hidCN, 100)),
                           ActionButton("Read HID") { [weak self] in self?.readHID() },
-                          ActionButton("Write HID") { [weak self] in self?.writeHID() }])
+                          ActionButton("Write HID") { [weak self] in self?.writeHID() },
+                          ActionButton("Unlock HID") { [weak self] in self?.startHIDUnlock() }])
         let protRow = hstack([hidProtect, field(hidPwd, 100)])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
-        let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). AWID, FDX-B and Paradox follow once captured.")
+        let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). Unlock HID removes write-protection on a card locked here: it runs in FSK/HID mode (the plain T5577 Unlock can't see an HID-locked card), authenticates with the known keys, clears the PWD bit and restores the FC/CN. AWID, FDX-B and Paradox follow once captured.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         hidRefresh()
         return vstack([head("HID Prox"), row, protRow, hidInfo, note])
@@ -387,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             name, V, fc, cn, b[0], b[1], b[2])
     }
     func writeHID() {
-        guard recPhase == .idle, !ulActive, !hidReadActive else { log("busy — another operation is running"); return }
+        guard recPhase == .idle, !ulActive, !hidReadActive, !hidUlActive else { log("busy — another operation is running"); return }
         let fc = parseU32(hidFC.stringValue), cn = parseU32(hidCN.stringValue)
         let freq = parseU32(idFreq.stringValue)
         let fmt = hidFormat()
@@ -415,7 +416,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var hidReadActive = false
     var hidReadRetries = 0
     func readHID() {
-        guard recPhase == .idle, !ulActive, !hidReadActive else { log("busy — another operation is running"); return }
+        guard recPhase == .idle, !ulActive, !hidReadActive, !hidUlActive else { log("busy — another operation is running"); return }
         hidReadActive = true; hidReadRetries = 0
         log("Read HID…")
         sendPayload(lfRFConfig(freq: parseU32(idFreq.stringValue)), "RF config")
@@ -435,6 +436,133 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         } else {
             hidReadActive = false
             log("✗ HID read: no HID card detected.")
+        }
+    }
+
+    // --- HID-mode unlock ---------------------------------------------------
+    // A card written protected (config 00107070) talks back in FSK2a/RF-50, so the plain-mode Unlock
+    // (which demods ASK/Manchester) never sees it. This sweep runs with the HID demod parameters.
+    // Because the PWD bit only gates WRITING — a protected card still reads normally — "a read works"
+    // cannot signal success. Instead, for each candidate we authenticate (op13) and write a one-bit
+    // MARKER into the data blocks; only the correct password lets that write take, so if the card then
+    // reads back the marker the key is proven. We then clear the PWD bit (00107070 → 00107060), restore
+    // the original FC/CN, and leave the card unprotected.
+    enum HIDULPhase { case idle, baseline, probe, restore }
+    var hidUlPhase: HIDULPhase = .idle
+    var hidUlActive = false
+    var hidUlKeys: [[UInt8]] = []
+    var hidUlIdx = 0
+    var hidUlRetries = 0
+    var hidUlFmt: HIDFormat = .h10301
+    var hidUlFC: UInt32 = 0
+    var hidUlCN: UInt32 = 0
+    func hidUnlockKeys() -> [[UInt8]] {
+        var keys: [[UInt8]] = []
+        func add(_ k: [UInt8]) { if !keys.contains(where: { $0 == k }) { keys.append(k) } }
+        add([0,0,0,0])                          // already-unprotected
+        add(fieldKey(hidPwd.stringValue))       // the password the user set here
+        add(fieldKey(lfT5Found.stringValue))    // T5577 Unlock Password field
+        for k in defaultLFKeys() { add(keyBytes(k)) }   // known keys
+        return keys
+    }
+    func startHIDUnlock() {
+        guard recPhase == .idle, !ulActive, !hidReadActive, !hidUlActive else { log("busy — another operation is running"); return }
+        hidUlActive = true; hidUlPhase = .baseline; hidUlIdx = 0; hidUlRetries = 0
+        hidUlKeys = hidUnlockKeys()
+        log("Unlock HID: reading card (FSK/HID mode) before sweeping \(hidUlKeys.count) key(s)…")
+        sendPayload(lfRFConfig(freq: parseU32(idFreq.stringValue)), "RF config (HID)")
+        afterDelay(0.25) { [weak self] in self?.sendPayload(hidReadCmd(), "baseline HID read") }
+    }
+    func hidUlMarkerCN() -> UInt32 {           // a CN one bit off the real one → always distinct
+        return hidUlFmt == .h10301 ? ((hidUlCN ^ 1) & 0xFFFF) : ((hidUlCN ^ 1) & 0x7FFFF)
+    }
+    func hidUlProbe() {
+        guard hidUlActive else { return }
+        if hidUlIdx >= hidUlKeys.count {
+            hidUlActive = false; hidUlPhase = .idle
+            log("✗ Unlock HID: no known key cleared the protection.")
+            return
+        }
+        let c = hidUlKeys[hidUlIdx]
+        let freq = parseU32(idFreq.stringValue)
+        let mark = hidT5BlocksV(hidValue(hidUlFmt, hidUlFC, hidUlMarkerCN()))
+        // Try to write the marker with this candidate. pwd 0 → op12 (no-pwd, tests an open card);
+        // any other candidate → op13 with that password (tests the key on a protected card).
+        var seq: [([UInt8], String)] = []
+        for (blk, w) in [(UInt8(1), mark[0]), (2, mark[1]), (3, mark[2])] {
+            if c == [0,0,0,0] { seq.append((lfT5WriteNoPwd(addr: blk, word: u32be(w), freq: freq), "marker blk\(blk) op12")) }
+            else { seq.append((lfT5Write(addr: blk, word: u32be(w), pwd: c, freq: freq), "marker blk\(blk) op13 (auth \(hexJoin(c)))")) }
+        }
+        hidUlPhase = .probe; hidUlRetries = 0
+        sendSeq(seq, gap: 0.28)
+        afterDelay(0.7) { [weak self] in
+            guard let self = self, self.hidUlActive, self.hidUlPhase == .probe else { return }
+            self.sendPayload(hidReadCmd(), "probe HID read")
+        }
+    }
+    func hidUlFinish(_ c: [UInt8]) {
+        // Correct key proven. Clear the PWD bit and restore the real FC/CN, then leave card open.
+        let freq = parseU32(idFreq.stringValue)
+        let open: [UInt8] = [0x00,0x10,0x70,0x60]
+        let data = hidT5BlocksV(hidValue(hidUlFmt, hidUlFC, hidUlCN))
+        var seq: [([UInt8], String)] = []
+        // Clear the PWD bit in block 0 (authenticated with the found key), and zero block 7.
+        if c == [0,0,0,0] {
+            seq.append((lfT5WriteNoPwd(addr: 0, word: open, freq: freq), "block0 = 00107060 op12"))
+        } else {
+            seq.append((lfT5Write(addr: 0, word: open, pwd: c, freq: freq), "block0 = 00107060 (auth \(hexJoin(c)))"))
+            seq.append((lfT5Write(addr: 7, word: [0,0,0,0], pwd: c, freq: freq), "block7 = 0 (auth \(hexJoin(c)))"))
+        }
+        // Now unprotected → restore the original data blocks with no-pwd writes.
+        for (blk, w) in [(UInt8(1), data[0]), (2, data[1]), (3, data[2])] {
+            seq.append((lfT5WriteNoPwd(addr: blk, word: u32be(w), freq: freq), "restore blk\(blk) op12"))
+        }
+        seq.append((lfT5WriteNoPwd(addr: 0, word: open, freq: freq), "block0 = 00107060 op12"))
+        seq.append((lfModeCmd(0x64, freq: freq), "HID finalize"))
+        hidUlPhase = .restore
+        sendSeq(seq, gap: 0.28)
+        afterDelay(1.4) { [weak self] in
+            guard let self = self else { return }
+            self.hidUlActive = false; self.hidUlPhase = .idle
+            self.hidProtect.state = .off
+            self.hidPwd.stringValue = (c == [0,0,0,0]) ? "00000000" : hexJoin(c)
+            self.hidFmtPop.selectItem(at: self.hidUlFmt.rawValue)
+            self.hidFC.stringValue = String(self.hidUlFC); self.hidCN.stringValue = String(self.hidUlCN); self.hidRefresh()
+            if c == [0,0,0,0] { self.log("✓ Unlock HID: card was already unprotected (FC=\(self.hidUlFC) CN=\(self.hidUlCN)).") }
+            else { self.log("✓ Unlock HID: cleared with key \(self.hexJoin(c)); card now unprotected (FC=\(self.hidUlFC) CN=\(self.hidUlCN)).") }
+        }
+    }
+    func handleHIDUnlock(_ bytes: [UInt8]) {
+        guard let (p, _, _, _) = Frame.parse(bytes) else { return }
+        let r = hidDecodeReply(p)
+        switch hidUlPhase {
+        case .baseline:
+            if let r = r, let fmt = r.fmt {
+                hidUlFmt = fmt; hidUlFC = r.fc; hidUlCN = r.cn
+                log(String(format: "Unlock HID: card reads FC=%u CN=%u (%d-bit); sweeping keys…", r.fc, r.cn, fmt == .h10301 ? 26 : 37))
+                hidUlIdx = 0; hidUlProbe()
+            } else if hidUlRetries < 8 {
+                hidUlRetries += 1
+                afterDelay(0.2) { [weak self] in self?.sendPayload(hidReadCmd(), "baseline HID read") }
+            } else {
+                hidUlActive = false; hidUlPhase = .idle
+                log("✗ Unlock HID: no HID card detected.")
+            }
+        case .probe:
+            if let r = r, let fmt = r.fmt {
+                if fmt == hidUlFmt && r.fc == hidUlFC && r.cn == hidUlMarkerCN() {
+                    log("Unlock HID: key \(hexJoin(hidUlKeys[hidUlIdx])) accepted (marker took) — clearing protection…")
+                    hidUlFinish(hidUlKeys[hidUlIdx])          // marker took → this key is correct
+                } else {
+                    hidUlIdx += 1; hidUlProbe()               // unchanged → wrong key, next
+                }
+            } else if hidUlRetries < 4 {
+                hidUlRetries += 1
+                afterDelay(0.2) { [weak self] in self?.sendPayload(hidReadCmd(), "probe HID read") }
+            } else {
+                hidUlIdx += 1; hidUlProbe()                   // couldn't read → treat as no-change
+            }
+        default: break
         }
     }
 
@@ -975,6 +1103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fPayload.stringValue = p.payloadHex.isEmpty ? "—" : p.payloadHex
         fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
         if recPhase != .idle { handleRecovery(bytes) }
+        else if hidUlActive { handleHIDUnlock(bytes) }
         else if hidReadActive { handleHIDRead(bytes) }
         else if ulActive { handleUnlock(bytes) }
         else if let want = writeExpectId, let id = recEMid(bytes) {   // verify a write actually took
