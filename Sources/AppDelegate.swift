@@ -532,19 +532,116 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func allKnownKeys() -> [[UInt8]] {
         var out: [[UInt8]] = []
         func add(_ b: [UInt8]) { if !out.contains(where: { $0 == b }) { out.append(b) } }
-        let typed = (unlockEM ? lfEMFound : lfT5Found).stringValue.trimmingCharacters(in: .whitespaces)
-        if !typed.isEmpty { add(keyBytes(typed)) }
+        let typed = fieldKey((unlockEM ? lfEMFound : lfT5Found).stringValue)   // only a clean 8-hex value
+        if typed != [0,0,0,0] { add(typed) }
         add(keyBytes("5469616E"))                       // "Tian" — the app's default, by far the most common
         for k in kT5NormalizeKeys { add(keyBytes(k)) }
         for k in kLFKeyDict { add(keyBytes(k)) }
         return out
     }
     func unlockCard(_ em4305: Bool) {
-        guard recPhase == .idle, !unlockActive, !reviveActive else { log("busy — another operation is running"); return }
-        unlockEM = em4305
-        unlockActive = true; unlockReadRetries = 0
-        log("Unlock \(em4305 ? "EM4305" : "T5577"): reading id, then clearing the password by trying every known key…")
-        sendPayload(lfRead(freq: parseU32(idFreq.stringValue)), "read id")
+        guard recPhase == .idle, !unlockActive, !reviveActive, !ulActive else { log("busy — another operation is running"); return }
+        if em4305 {
+            unlockEM = true; unlockActive = true; unlockReadRetries = 0
+            log("Unlock EM4305: reading id, then clearing the password by trying every known key…")
+            sendPayload(lfRead(freq: parseU32(idFreq.stringValue)), "read id")
+        } else {
+            startUnlockT5()
+        }
+    }
+
+    // ---- Identifying T5577 unlock: find WHICH known key unlocks, stop at it, populate the field ----
+    // Per key K: zero the password block authenticating with K, then write a MARKER id with password 0.
+    // Only the correct key clears the password, so only then does the marker take and the read change.
+    // On a hit we restore the real id and clear the PWD bit; the found key is written to the pwd field.
+    enum ULPhase { case idle, baseline, test }
+    var ulActive = false
+    var ulPhase: ULPhase = .idle
+    var ulKeys: [[UInt8]] = []
+    var ulIdx = 0
+    var ulOrigId: UInt64 = 0
+    var ulMarker: UInt64 = 0
+    var ulFreq: UInt32 = 125000
+    var ulQueue: [([UInt8], String)] = []
+    var ulAwaitRead = false
+    var ulReadRetries = 0
+    let ulGap = 0.08
+    let ulSettle = 0.2
+    func hexJoin(_ b: [UInt8]) -> String { b.map { String(format: "%02X", $0) }.joined() }
+    func startUnlockT5() {
+        ulActive = true; ulPhase = .baseline; ulIdx = 0; ulReadRetries = 0; ulAwaitRead = false
+        ulFreq = parseU32(idFreq.stringValue)
+        unlockEM = false
+        ulKeys = allKnownKeys()
+        lfT5Found.stringValue = "unlocking…"
+        log("Unlock T5577: testing \(ulKeys.count) known keys, stopping at the one that works…")
+        sendPayload(lfRFConfig(freq: ulFreq), "RF config")      // gated: its reply triggers the baseline read
+    }
+    func ulStep() {
+        if !ulQueue.isEmpty { let c = ulQueue.removeFirst(); afterDelay(ulGap) { [weak self] in self?.sendPayload(c.0, c.1) } }
+        else { ulAwaitRead = true; ulReadRetries = 0; afterDelay(ulSettle) { [weak self] in guard let s = self else { return }; s.sendPayload(lfRead(freq: s.ulFreq), "probe read") } }
+    }
+    func ulNextKey() {
+        guard ulIdx < ulKeys.count else {
+            ulActive = false; ulPhase = .idle
+            lfT5Found.stringValue = "not found"
+            log("✗ Unlock T5577: none of \(ulKeys.count) known keys unlocked the card — its password isn't in the known set.")
+            return
+        }
+        let k = ulKeys[ulIdx]
+        let (mw1, mw2) = em4100Words(ulMarker)
+        ulQueue = [
+            (lfT5Write(addr: 7, word: [0,0,0,0], pwd: k, freq: ulFreq), "clear pwd auth \(hexJoin(k))"),
+            (lfT5Write(addr: 1, word: u32be(mw1), pwd: [0,0,0,0], freq: ulFreq), "probe blk1"),
+            (lfT5Write(addr: 2, word: u32be(mw2), pwd: [0,0,0,0], freq: ulFreq), "probe blk2"),
+        ]
+        ulAwaitRead = false
+        ulStep()
+    }
+    func ulKeyFound() {
+        let k = ulKeys[ulIdx]
+        ulActive = false; ulPhase = .idle
+        lfT5Found.stringValue = hexJoin(k)                      // <-- found password populates the field
+        log("✓ Unlock T5577: password is \(hexJoin(k)). Restoring id \(String(format: "%010llX", ulOrigId)) and clearing protection.")
+        let (w1, w2) = em4100Words(ulOrigId)
+        writeExpectId = ulOrigId; writeExpectEM = false
+        sendSeq([
+            (lfT5Write(addr: 1, word: u32be(w1), pwd: [0,0,0,0], freq: ulFreq), "restore blk1"),
+            (lfT5Write(addr: 2, word: u32be(w2), pwd: [0,0,0,0], freq: ulFreq), "restore blk2"),
+            (lfT5Write(addr: 0, word: [0x00,0x14,0x80,0x40], pwd: [0,0,0,0], freq: ulFreq), "config PWD clear"),
+            (lfModeCmd(0x05, freq: ulFreq), "LF read-mode"),
+            (lfRead(freq: ulFreq), "verify read"),
+        ], gap: 0.2)
+    }
+    func handleUnlockT5(_ bytes: [UInt8]) {
+        let emid = recEMid(bytes)
+        switch ulPhase {
+        case .baseline:
+            if !ulAwaitRead {                                   // RF-config reply → now read the id
+                ulAwaitRead = true
+                afterDelay(ulGap) { [weak self] in guard let s = self else { return }; s.sendPayload(lfRead(freq: s.ulFreq), "read id") }
+                return
+            }
+            guard let id = emid else {                          // waiting for a readable id
+                ulReadRetries += 1
+                if ulReadRetries < 8 { afterDelay(ulGap) { [weak self] in guard let s = self else { return }; s.sendPayload(lfRead(freq: s.ulFreq), "read id") }; return }
+                ulActive = false; ulPhase = .idle; lfT5Found.stringValue = "no card"
+                log("✗ Unlock T5577: no card to read."); return
+            }
+            ulOrigId = id; ulMarker = id ^ 1                    // a different, still-valid id to probe with
+            ulReadRetries = 0; ulIdx = 0; ulPhase = .test
+            ulNextKey()
+        case .test:
+            if !ulAwaitRead { ulStep(); return }                // a write ack arrived → send next command
+            if let id = emid {
+                if id == ulMarker { ulKeyFound() }              // marker took → this key cleared the password
+                else { ulReadRetries = 0; ulIdx += 1; ulNextKey() }   // unchanged → wrong key, next
+            } else if ulReadRetries < 3 {                       // read glitch → retry
+                ulReadRetries += 1
+                afterDelay(ulSettle) { [weak self] in guard let s = self else { return }; s.sendPayload(lfRead(freq: s.ulFreq), "probe read") }
+            } else { ulReadRetries = 0; ulIdx += 1; ulNextKey() }
+        case .idle: break
+        }
     }
     func handleUnlock(_ bytes: [UInt8]) {
         guard let id = recEMid(bytes) else {       // no-card read → retry before giving up
@@ -696,6 +793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fPayload.stringValue = p.payloadHex.isEmpty ? "—" : p.payloadHex
         fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
         if recPhase != .idle { handleRecovery(bytes) }
+        else if ulActive { handleUnlockT5(bytes) }
         else if unlockActive { handleUnlock(bytes) }
         else if reviveActive { handleRevive(bytes) }
         else if let want = writeExpectId, let id = recEMid(bytes) {   // verify a write actually took
