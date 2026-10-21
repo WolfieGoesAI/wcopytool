@@ -309,8 +309,49 @@ func em4305LoginBytes(pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
 // FSK2a, RF/50, 3 data blocks. HID data lives in blocks 1,2,3.
 let kT5HIDConfigWire: [UInt8] = [0x00,0x10,0x70,0x60]
 
-// HID card formats this app supports.
-enum HIDFormat: Int { case h10301 = 0, h10304 = 1 }   // 26-bit, 37-bit
+// LF prox formats this app can write. HID 26/37 are capture-verified; AWID 26 is spec-based
+// (Proxmark getAWIDBits) and WRITE-ONLY (this reader can't read AWID back) — verify on another reader.
+enum HIDFormat: Int { case h10301 = 0, h10304 = 1, awid26 = 2 }   // HID 26-bit, HID 37-bit, AWID 26-bit
+
+// AWID 26-bit (FSK2a, RF/50) → three T5577 data blocks (blocks 1-3). Same T5577 config as HID
+// (0x00107060). Built per Proxmark getAWIDBits: 96-bit stream = 8-bit preamble 00000001, then
+// addParity(pre, groups of 3 + 1 odd-parity bit) over a 66-bit buffer that is
+//   [fmtlen=26 : 8 bits][Wiegand-26 (EP | 8-bit FC | 16-bit CN | OP) : 26 bits][zero pad : 32 bits].
+// SPEC-BASED, not yet capture-verified.
+func awid26Blocks(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
+    // 24 data bits: 8-bit FC then 16-bit CN
+    var data: [Int] = []
+    for i in stride(from: 7,  through: 0, by: -1) { data.append(Int((fc >> UInt32(i)) & 1)) }
+    for i in stride(from: 15, through: 0, by: -1) { data.append(Int((cn >> UInt32(i)) & 1)) }
+    let ep = data[0..<12].reduce(0, +) % 2                 // even parity over top 12
+    let op = (data[12..<24].reduce(0, +) + 1) % 2          // odd parity over bottom 12
+    let wiegand: [Int] = [ep] + data + [op]                // 26 bits
+    // 66-bit pre buffer: fmtlen(26) as 8 bits, then the 26-bit wiegand, then pad with zeros to 66
+    var pre: [Int] = []
+    for i in stride(from: 7, through: 0, by: -1) { pre.append((26 >> i) & 1) }
+    pre += wiegand
+    while pre.count < 66 { pre.append(0) }
+    // addParity: emit each group of 3 source bits followed by an odd-parity bit → 88 bits
+    var body: [Int] = []
+    var i = 0
+    while i < 66 {
+        let grp = Array(pre[i..<min(i + 3, 66)])
+        body += grp
+        body.append(grp.reduce(0, +) % 2 == 0 ? 1 : 0)     // odd parity of the group
+        i += 3
+    }
+    let bits: [Int] = [0,0,0,0,0,0,0,1] + body             // 8-bit preamble + 88 = 96
+    var out = [UInt32](repeating: 0, count: 3)
+    for (j, b) in bits.enumerated() { out[j/32] = (out[j/32] << 1) | UInt32(b) }
+    return out
+}
+// Blocks 1-3 for any supported LF prox format.
+func lfProxBlocks(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> [UInt32] {
+    switch fmt {
+    case .awid26: return awid26Blocks(fc, cn)
+    default:      return hidT5BlocksV(hidValue(fmt, fc, cn))
+    }
+}
 
 // 26-bit HID (H10301) Wiegand: even parity | 8-bit facility | 16-bit card | odd parity.
 func hidWiegand26(_ fc: UInt32, _ cn: UInt32) -> UInt32 {

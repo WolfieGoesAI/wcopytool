@@ -360,7 +360,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func pageHID() -> NSView {
         hidFC.target = self; hidFC.action = #selector(hidEdited)
         hidCN.target = self; hidCN.action = #selector(hidEdited)
-        hidFmtPop.addItems(withTitles: ["26-bit (H10301)", "37-bit (H10304)"])
+        hidFmtPop.addItems(withTitles: ["HID 26-bit (H10301)", "HID 37-bit (H10304)", "AWID 26-bit"])
         hidFmtPop.selectItem(at: 0)
         hidFmtPop.target = self; hidFmtPop.action = #selector(hidEdited)
         let row = hstack([labeled("Format:", hidFmtPop),
@@ -372,7 +372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let protRow = hstack([hidProtect, field(hidPwd, 100),
                               labeled("Current card password:", field(hidUnlock, 100))])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
-        let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). Current card password: the password already on the card — needed to re-write or unprotect a card you previously locked (leave 00000000 for a blank card); it is remembered automatically after a protected write. Unlock HID identifies the card's password by testing the known keys one at a time (stopping at the one that works), reports it, and converts the card to an unprotected plain EM4100 (the 125 kHz tab's id, or 1 — a real, non-blank id so a direct HID re-write works). The found password is shown in Current card password for reference; the card itself is left unprotected. Re-write it as HID or EM afterwards. AWID, FDX-B and Paradox follow once captured.")
+        let note = NSTextField(wrappingLabelWithString: "HID Prox on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read auto-detects the format and fills FC/CN. H10301 is 26-bit (8-bit FC / 16-bit CN); H10304 is 37-bit (16-bit FC / 19-bit CN). Current card password: the password already on the card — needed to re-write or unprotect a card you previously locked (leave 00000000 for a blank card); it is remembered automatically after a protected write. Unlock HID identifies the card's password by testing the known keys one at a time (stopping at the one that works), reports it, and converts the card to an unprotected plain EM4100 (the 125 kHz tab's id, or 1 — a real, non-blank id so a direct HID re-write works). The found password is shown in Current card password for reference; the card itself is left unprotected. Re-write it as HID or EM afterwards. AWID 26-bit is write-only (this reader can't read AWID back) and spec-based — verify it on another reader. Paradox and FDX-B follow.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         hidRefresh()
         return vstack([head("HID Prox"), row, protRow, hidInfo, note])
@@ -382,24 +382,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func hidRefresh() {
         let fc = parseU32(hidFC.stringValue), cn = parseU32(hidCN.stringValue)
         let fmt = hidFormat()
-        let V = hidValue(fmt, fc, cn)
-        let b = hidT5BlocksV(V)
-        let name = fmt == .h10301 ? "H10301 (26-bit)" : "H10304 (37-bit)"
+        let b = lfProxBlocks(fmt, fc, cn)
+        let name: String
+        switch fmt {
+        case .h10301: name = "H10301 (HID 26-bit)"
+        case .h10304: name = "H10304 (HID 37-bit)"
+        case .awid26: name = "AWID 26-bit (write-only, unverified)"
+        }
         hidInfo.stringValue = String(format:
-            "%@  value %llX   (FC %u, CN %u)\nT55x7 cfg  : 00107060   blk1 %08X  blk2 %08X  blk3 %08X",
-            name, V, fc, cn, b[0], b[1], b[2])
+            "%@   (FC %u, CN %u)\nT55x7 cfg  : 00107060   blk1 %08X  blk2 %08X  blk3 %08X",
+            name, fc, cn, b[0], b[1], b[2])
     }
     func writeHID() {
         guard recPhase == .idle, !ulActive, !hidReadActive, !hidUlActive else { log("busy — another operation is running"); return }
         let fc = parseU32(hidFC.stringValue), cn = parseU32(hidCN.stringValue)
         let freq = parseU32(idFreq.stringValue)
         let fmt = hidFormat()
-        let data = hidT5BlocksV(hidValue(fmt, fc, cn))
+        let data = lfProxBlocks(fmt, fc, cn)
         let protect = hidProtect.state == .on
         let setPwd = protect ? fieldKey(hidPwd.stringValue) : [0,0,0,0]
         // The card's CURRENT password — needed to re-write or unprotect a card that already has one.
         let cur = fieldKey(hidUnlock.stringValue)
-        log(String(format: "HID %@ write FC=%u CN=%u → blocks %08X %08X %08X, config %@ (current pwd %@)", fmt == .h10301 ? "26-bit" : "37-bit", fc, cn, data[0], data[1], data[2], protect ? "00107070 (locked)" : "00107060", hexJoin(cur)))
+        let fmtName = fmt == .h10301 ? "HID 26-bit" : (fmt == .h10304 ? "HID 37-bit" : "AWID 26-bit")
+        log(String(format: "%@ write FC=%u CN=%u → blocks %08X %08X %08X, config %@ (current pwd %@)", fmtName, fc, cn, data[0], data[1], data[2], protect ? "00107070 (locked)" : "00107060", hexJoin(cur)))
         var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config")]
         // Set the password (block 7) to the new value, authenticating with the current password, 0, and
         // the known keys — so the change takes whether the card is blank or already protected.
