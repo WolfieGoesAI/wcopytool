@@ -52,10 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let lfConfig = NSTextField(string: "00148040")
     let lfBlk = NSTextField(string: "1")
     let lfWord = NSTextField(string: "00000000")
-    var chipEM4305 = false   // false = T5577 (op 0x13), true = EM4305 (op 0x12)
     let lfPwd = NSTextField(string: "00000000")
-    let lfT5Found = NSTextField(labelWithString: "—")
-    let lfEMFound = NSTextField(labelWithString: "—")
+    let lfT5Found = NSTextField(string: "00000000")   // editable: found or user-entered password
+    let lfEMFound = NSTextField(string: "00000000")
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
     let rawFrame = NSTextField(string: "01 0F 00 00 FF 00 9A 5A A5 54 69 61 6E")
     var regFields: [UInt8: NSTextField] = [:]
@@ -283,28 +282,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                               var tail = parseHexBlob(s.lfTail.stringValue)
                               if tail.isEmpty { tail = [0,0,0,0] }
                               s.sendPayload(lf65(mode: parseByte(s.lfMode.stringValue), freq: parseU32(s.idFreq.stringValue), tail: tail), "LF 0x65 experiment") }])
-        // Write — EM4100 to the selected chip (T5577 / EM4305). Writes data+config then reads back.
-        let t5 = NSButton(radioButtonWithTitle: "T5577", target: self, action: #selector(chipChanged(_:)))
-        let em = NSButton(radioButtonWithTitle: "EM4305", target: self, action: #selector(chipChanged(_:)))
-        t5.tag = 0; em.tag = 1; t5.state = .on
-        let chipRow = hstack([NSTextField(labelWithString: "Chip:"), t5, em])
+        // Write — EM4100, explicit per chip. Writes data+config (with the Password field) then verifies.
         let writeRow = hstack([labeled("Card #:", field(lfWriteId, 130)),
                                labeled("Config:", field(lfConfig, 90)),
-                               ActionButton("Write EM4100") { [weak self] in self?.writeEM() }])
-        lfT5Found.font = mono(11); lfT5Found.isSelectable = true
-        lfEMFound.font = mono(11); lfEMFound.isSelectable = true
+                               ActionButton("Write T5577") { [weak self] in self?.writeEM(false) },
+                               ActionButton("Write EM4305") { [weak self] in self?.writeEM(true) }])
         let pwdRow = hstack([labeled("Password:", field(lfPwd, 100)),
                              ActionButton("Find T5577 pwd") { [weak self] in self?.findPwd(false) },
                              ActionButton("Find EM4305 pwd") { [weak self] in self?.findPwd(true) }])
-        let foundRow = hstack([labeled("T5577 pwd:", lfT5Found), labeled("EM4305 pwd:", lfEMFound)])
+        // Found/entered password per chip (editable) + Unlock (rewrite id, clear protection & password).
+        let foundRow = hstack([
+            labeled("T5577 pwd:", field(lfT5Found, 100)),
+            ActionButton("Unlock T5577") { [weak self] in self?.unlockCard(false) },
+            labeled("EM4305 pwd:", field(lfEMFound, 100)),
+            ActionButton("Unlock EM4305") { [weak self] in self?.unlockCard(true) }])
         let blkRow = hstack([labeled("Addr:", field(lfBlk, 40)),
                              labeled("Word (hex):", field(lfWord, 100)),
-                             ActionButton("Write word") { [weak self] in self?.writeBlockManual() }])
+                             ActionButton("Write T5577 word") { [weak self] in self?.writeBlockManual(false) },
+                             ActionButton("Write EM4305 word") { [weak self] in self?.writeBlockManual(true) }])
         let warn = NSTextField(wrappingLabelWithString: "⚠︎ EM4100 data write only (no password/lock). T5577 op 0x13 is verified working; EM4305 op 0x12 uses the same frame/encoder — test on a spare EM4305 and check the auto read-back (its config word may differ from T5577's 00148040). HID-prox formats and lock/unlock keys are the next staged steps.")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
         let note = NSTextField(wrappingLabelWithString: "Read ID uses FF 00 65 05 1E <freq> 00 00 00 00 → 5-byte EM4100 id. 0x68 = model/firmware, 0x69 = serial. 0x65 experimenter is for probing other LF modes.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), dev, readRow, freqs, chipRow, writeRow, pwdRow, foundRow, blkRow, exp, warn, note])
+        return vstack([head("125 kHz ID"), dev, readRow, freqs, writeRow, pwdRow, foundRow, blkRow, exp, warn, note])
     }
     func setFreq(_ f: UInt32) { idFreq.stringValue = String(f) }
 
@@ -317,17 +317,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         }
     }
 
-    @objc func chipChanged(_ sender: NSButton) { chipEM4305 = (sender.tag == 1) }
-
-    // EM4100 data write to the selected chip (T5577 op 0x13 / EM4305 op 0x12): data to addr 1,2,
-    // config to addr 0, then read back to verify. No password/lock.
+    // EM4100 data write to a chip (T5577 op 0x13 / EM4305 op 0x12): data to addr 1,2,
+    // config to addr 0, then read back to verify. Uses the Password field for protected cards.
     func currentPwd() -> [UInt8] { keyBytes(lfPwd.stringValue) }
-    func writeEM() {
+    func writeEM(_ em4305: Bool) {
         let id = parseU40(lfWriteId.stringValue)
         let (w1, w2) = em4100Words(id)
         let freq = parseU32(idFreq.stringValue)
         let pwd = currentPwd()
-        if chipEM4305 {
+        if em4305 {
             // Native EM4305: login (with password), word5/6 = data, word4 = config, verify.
             log(String(format: "EM4305 write id=%010llX  w1=%08X w2=%08X pwd=%@", id, w1, w2, hex(pwd)))
             sendSeq([
@@ -409,7 +407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             if id == recMarker {
                 let (label, key) = recCands[recIdx]
                 recPhase = .idle
-                (recEM ? lfEMFound : lfT5Found).stringValue = "\(label)  (\(hex(key)))"
+                (recEM ? lfEMFound : lfT5Found).stringValue = key.map { String(format: "%02X", $0) }.joined()
                 log("✓ PASSWORD FOUND: \(label)  (wire \(hex(key))) — restoring original id")
                 sendSeq(recWriteSeq(id: recOrig, key: key, label: "restore"), gap: 0.12)
             } else {
@@ -420,17 +418,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             break
         }
     }
-    func writeBlockManual() {
+    func writeBlockManual(_ em4305: Bool) {
         let addr = parseByte(lfBlk.stringValue)
         let word = UInt32(lfWord.stringValue.replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0
         let freq = parseU32(idFreq.stringValue)
-        if chipEM4305 {
+        if em4305 {
             sendPayload(em4305WriteWord(addr: addr, bytes: u32be(word), freq: freq),
                         String(format: "EM4305 write word %d = %08X", Int(addr), word))
         } else {
             sendPayload(lfWriteBlock(block: addr, word: word, freq: freq),
                         String(format: "T5577 write block %d = %08X", Int(addr), word))
         }
+    }
+
+    // ---- Unlock: read current id, rewrite it with the found/entered password, and reset the
+    // password to 0 with protection cleared, leaving the card writable without a password.
+    var unlockActive = false
+    var unlockEM = false
+    var unlockPwd: [UInt8] = []
+    func unlockCard(_ em4305: Bool) {
+        guard recPhase == .idle, !unlockActive else { log("busy — another operation is running"); return }
+        unlockEM = em4305
+        unlockPwd = keyBytes((em4305 ? lfEMFound : lfT5Found).stringValue)
+        unlockActive = true
+        log("Unlock \(em4305 ? "EM4305" : "T5577") with pwd \(hex(unlockPwd)): reading id…")
+        sendPayload(lfRead(freq: parseU32(idFreq.stringValue)), "read id")
+    }
+    func handleUnlock(_ bytes: [UInt8]) {
+        guard let id = recEMid(bytes) else { return }
+        unlockActive = false
+        let freq = parseU32(idFreq.stringValue)
+        let (w1, w2) = em4100Words(id)
+        let pwd = unlockPwd
+        log(String(format: "Unlock: id=%010llX — rewriting data, clearing protection + password", id))
+        var seq: [([UInt8], String)]
+        if unlockEM {
+            // EM4305: login, rewrite data + config, set password word2 = 0.
+            seq = [
+                (em4305LoginBytes(pwd: pwd, freq: freq), "login"),
+                (em4305WriteWord(addr: 5, bytes: u32be(w1), freq: freq), "w5 data1"),
+                (em4305WriteWord(addr: 6, bytes: u32be(w2), freq: freq), "w6 data2"),
+                (em4305WriteWord(addr: 4, bytes: kEM4305ConfigWire, freq: freq), "w4 config"),
+                (em4305WriteWord(addr: 2, bytes: [0,0,0,0], freq: freq), "w2 password=0"),
+                (lfRead(freq: freq), "verify read"),
+            ]
+        } else {
+            // T5577: rewrite data, config with PWD bit CLEAR (0x00148040), password block7 = 0 —
+            // all authenticated with the current password.
+            seq = [
+                (lfT5Write(addr: 1, word: u32be(w1), pwd: pwd, freq: freq), "block1 data1"),
+                (lfT5Write(addr: 2, word: u32be(w2), pwd: pwd, freq: freq), "block2 data2"),
+                (lfT5Write(addr: 0, word: u32be(0x00148040), pwd: pwd, freq: freq), "block0 config (PWD clear)"),
+                (lfT5Write(addr: 7, word: [0,0,0,0], pwd: pwd, freq: freq), "block7 password=0"),
+                (lfRead(freq: freq), "verify read"),
+            ]
+        }
+        sendSeq(seq, gap: 0.15)
     }
 
     func pageConfig() -> NSView {
@@ -540,6 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fPayload.stringValue = p.payloadHex.isEmpty ? "—" : p.payloadHex
         fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
         if recPhase != .idle { handleRecovery(bytes) }
+        else if unlockActive { handleUnlock(bytes) }
     }
 
     func log(_ s: String) {
