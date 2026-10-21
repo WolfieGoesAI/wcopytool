@@ -133,17 +133,17 @@ class MainActivity : ComponentActivity() {
                 Spacer(Modifier.width(8.dp))
                 Btn("Write EM4305") { go { reader.writeEM4305(Fmt.parseDecId(id.value), protect.value, pwd.value, emPwd.value, f, ::log) } }
             }
-            CheckRow("Password-protect with password:", protect); if (protect.value) HexField("New password", pwd)
+            CheckRow("Password-protect with password:", protect); HexField("New password", pwd)
             HexField("T5577 Unlock Password", t5Pwd)
             HexField("EM4305 Unlock Password", emPwd)
             Row {
                 Btn("Unlock T5577") { go {
-                    val keys = reader.expandKeys(unlockKeys(keyText.value, t5Pwd.value, false), bitRev.value, byteRev.value)
+                    val keys = reader.expandKeys(unlockKeys(keyText.value, t5Pwd.value, pwd.value, false), bitRev.value, byteRev.value)
                     applyFound(t5Pwd, reader.unlockT5577(keys, f, ::log))
                 } }
                 Spacer(Modifier.width(8.dp))
                 Btn("Unlock EM4305") { go {
-                    val keys = reader.expandKeys(unlockKeys(keyText.value, emPwd.value, true), bitRev.value, byteRev.value)
+                    val keys = reader.expandKeys(unlockKeys(keyText.value, emPwd.value, pwd.value, true), bitRev.value, byteRev.value)
                     applyFound(emPwd, reader.unlockEM4305(keys, f, ::log))
                 } }
             }
@@ -182,11 +182,11 @@ class MainActivity : ComponentActivity() {
                     reader.writeCard(blocks, Proto.lfProxConfig(f), protect.value, pwd.value, cur.value, Fmt.parseDec0(freq.value), ::log)
                 } }
             }
-            CheckRow("Write-protect with password:", protect); if (protect.value) HexField("New password", pwd)
+            CheckRow("Write-protect with password:", protect); HexField("New password", pwd)
             HexField("Current card password", cur)
             Row {
                 Btn("Unlock HID → EM") { go {
-                    val keys = reader.expandKeys(unlockKeys(keyText.value, cur.value, false), bitRev.value, byteRev.value)
+                    val keys = reader.expandKeys(unlockKeys(keyText.value, cur.value, pwd.value, false), bitRev.value, byteRev.value)
                     reader.unlockHID(keys, 1L, Fmt.parseDec0(freq.value), ::log)
                 } }
             }
@@ -215,10 +215,11 @@ class MainActivity : ComponentActivity() {
     }
 
     // helpers
-    private fun unlockKeys(keyText: String, cur: String, em: Boolean): List<IntArray> {
+    private fun unlockKeys(keyText: String, cur: String, newPwd: String, em: Boolean): List<IntArray> {
         val out = ArrayList<IntArray>()
         fun add(k: IntArray) { if (out.none { it.contentEquals(k) }) out.add(k) }
         add(Proto.fieldKey(cur))
+        add(Proto.fieldKey(newPwd))            // also try the New password field (like the Mac app)
         Proto.NORMALIZE.forEach { add(Proto.keyBytes(it)) }
         if (em) Proto.EM4305_NORMALIZE.forEach { add(Proto.keyBytes(it)) }
         keyText.split("\n").forEach { val h = it.trim().replace(" ", ""); if (h.length == 8) add(Proto.keyBytes(h)) }
