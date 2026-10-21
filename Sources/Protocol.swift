@@ -305,8 +305,29 @@ func em4305LoginBytes(pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
     [0xFF,0x00,0x66,0x00,0x1E] + u32le(freq) + [0x21] + pad4(pwd)
 }
 
-// T5577 HID-prox FSK config (block 0), wire order (= 0x00107060).
+// T5577 HID-prox FSK config (block 0), wire order (= 0x00107060). Confirmed from the binary:
+// FSK2a, RF/50, 3 data blocks. HID data lives in blocks 1,2,3.
 let kT5HIDConfigWire: [UInt8] = [0x00,0x10,0x70,0x60]
+
+// 26-bit HID (H10301) Wiegand: even parity | 8-bit facility | 16-bit card | odd parity.
+func hidWiegand26(_ fc: UInt32, _ cn: UInt32) -> UInt32 {
+    let f = fc & 0xFF, c = cn & 0xFFFF
+    let top = (f << 4) | ((c >> 12) & 0xF)       // top 12 data bits
+    let bot = c & 0xFFF                          // bottom 12 data bits
+    let ep = UInt32(top.nonzeroBitCount % 2)     // even parity
+    let op = UInt32((bot.nonzeroBitCount + 1) % 2) // odd parity
+    return (ep << 25) | (f << 17) | (c << 1) | op
+}
+
+// PROVISIONAL 26-bit HID → three T5577 data blocks (blocks 1,2,3). The leading HID preamble is
+// 0x1D (per the FSK2a format); the 27-bit "sentinel + 26-bit Wiegand" is placed after it, giving a
+// left-justified 96-bit pattern. This MUST be verified against a USB capture of the original app
+// writing a known HID card — the exact bit layout is not yet confirmed.
+func hidT5Blocks26(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
+    let w = hidWiegand26(fc, cn)
+    let b1: UInt32 = (UInt32(0x1D) << 27) | (UInt32(1) << 26) | w   // preamble + sentinel + Wiegand
+    return [b1, 0x00000000, 0x00000000]                  // blocks 2,3 TBD — verify with a capture
+}
 
 func parseU40(_ s: String) -> UInt64 {
     let t = s.trimmingCharacters(in: .whitespaces)
