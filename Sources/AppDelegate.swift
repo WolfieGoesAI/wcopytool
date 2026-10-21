@@ -262,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ActionButton("Device info (0x68)") { [weak self] in self?.sendPayload([0xFF,0x00,0x68], "device info") },
             ActionButton("Serial number (0x69)") { [weak self] in self?.sendPayload([0xFF,0x00,0x69], "serial") },
             ActionButton("Init / Reset reader") { [weak self] in self?.resetReader() },
-            ActionButton("Unbrick T5577 (test mode)") { [weak self] in self?.unbrickT5() },
+            ActionButton("Unbrick T5577 (pwd sweep)") { [weak self] in self?.unbrickT5() },
         ])
         // Confirmed LF read: FF 00 65 05 1E <freq> 00 00 00 00 → reply 02 0C 01 00 05 <5-byte EM id> CHK FD
         let readRow = hstack([labeled("Freq (Hz):", field(idFreq, 90)),
@@ -302,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                              labeled("Word (hex):", field(lfWord, 100)),
                              ActionButton("Write T5577 word") { [weak self] in self?.writeBlockManual(false) },
                              ActionButton("Write EM4305 word") { [weak self] in self?.writeBlockManual(true) }])
-        let warn = NSTextField(wrappingLabelWithString: "⚠︎ \u{201C}Find pwd (read)\u{201D} is non-destructive: it tests passwords by READING only (T5577 password-read, EM4305 login+read) and never writes, so it can\u{2019}t brick a card. It can only find a password on a read-protected card; a card that already reads without a password is write-protected only, and its write password can\u{2019}t be found by reading. Unlock/Write do write to the card. \u{201C}Unbrick T5577\u{201D} rewrites block 0 in test mode (older T5577 only) to revive a card that went dark.")
+        let warn = NSTextField(wrappingLabelWithString: "⚠︎ \u{201C}Find pwd (read)\u{201D} is non-destructive: it tests passwords by READING only (T5577 password-read, EM4305 login+read) and never writes, so it can\u{2019}t brick a card. It can only find a password on a read-protected card; a card that already reads without a password is write-protected only, and its write password can\u{2019}t be found by reading. Unlock/Write do write to the card. \u{201C}Unbrick T5577\u{201D} rewrites block 0 to a safe default, authenticating with every known password (this reader has no test mode — a card whose password is unknown can only be revived by a Proxmark).")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
         let note = NSTextField(wrappingLabelWithString: "Read ID uses FF 00 65 05 1E <freq> 00 00 00 00 → 5-byte EM4100 id. 0x68 = model/firmware, 0x69 = serial. 0x65 experimenter is for probing other LF modes.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
@@ -335,29 +335,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // answers to one waveform. Writes are well-spaced so a confused card isn't hammered.
     // NOTE: whether this firmware honours the test-mode/flag byte is unproven — if the card stays
     // dark, revive it with the PC app or X7 (both confirmed working), then reprogram here.
+    // Reset a write-protected / mis-configured T5577 to a readable state by rewriting block 0 to a
+    // safe default config (0x000880E0), authenticating with each known password in turn. A write
+    // with the wrong password is ignored by the chip (harmless); the correct one resets the config
+    // and the card reads again. This is NOT Proxmark test mode — this reader's firmware has no test
+    // mode (verified in the binary: the T5577 write flags byte is always 0), so a card whose
+    // password is in no dictionary can only be revived by a Proxmark (direct-RF test mode).
     func unbrickT5() {
         let f = parseU32(idFreq.stringValue)
         let cfg = u32be(kT5UnbrickConfig)
-        log(String(format: "Unbrick T5577: rewriting block0 = %08X (safe default) — password-mode sweep (mirrors the working Proxmark script)…", kT5UnbrickConfig))
-        // Candidate passwords: the script's four, plus whatever is typed in the Password field.
-        // Try each in normal AND reversed byte order (T5577 password byte order is finicky).
+        // Candidate passwords: the typed one first, then the script's four, then the full dictionary.
         var pwds: [[UInt8]] = []
-        func addPwd(_ b: [UInt8]) {
-            for v in [pad4(b), rev4(b)] where !pwds.contains(where: { $0 == v }) { pwds.append(v) }
-        }
-        for h in kT5UnbrickPwds { addPwd(keyBytes(h)) }
+        func addPwd(_ b: [UInt8]) { if !pwds.contains(where: { $0 == b }) { pwds.append(b) } }
         let typed = currentPwd(); if typed != [0,0,0,0] { addPwd(typed) }
+        for h in kT5UnbrickPwds { addPwd(keyBytes(h)) }
+        for k in kLFKeyDict { addPwd(keyBytes(k)) }
+        log(String(format: "Unbrick T5577: rewriting block0 = %08X, authenticating with %d known passwords (no test mode — this reader can't)…", kT5UnbrickConfig, pwds.count))
         var seq: [([UInt8], String)] = []
-        // Password-mode block-0 writes (op 0x13, mode 0x00) — the part of the script that revives a
-        // real/newer card. A write with the wrong password is ignored by the chip (harmless).
         for p in pwds {
             seq.append((lfT5WriteMode(addr: 0, word: cfg, pwd: p, freq: f, mode: 0x00), "blk0 pwd \(hex(p))"))
         }
-        // Then a bare test-mode-style write (no password) for an unprotected card, and a read.
-        seq.append((lfT5WriteMode(addr: 0, word: cfg, pwd: [0,0,0,0], freq: f, mode: 0x00), "blk0 pwd0"))
         seq.append((lfRead(freq: f), "read after unbrick"))
-        log("  passwords tried: \(pwds.map { hex($0) }.joined(separator: " "))")
-        sendSeq(seq, gap: 0.5)
+        sendSeq(seq, gap: 0.4)
     }
 
     // Modal yes/no confirmation. Returns true if the user approves (always true in a headless run).

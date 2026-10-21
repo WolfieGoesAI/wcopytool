@@ -235,3 +235,19 @@ Hindi/Malay/Japanese (disabled). Text is loaded at runtime from `Language.ini`.
 - Update: `http://www.nsccn.com/download/soft/nfc/nfcPro_x64.exe` (+ `_version.txt`, `_kgf_`, `_wcopy_`).
 - Online key cracking: `…/proxy/NFCReaderTools/liftanalyze/?data=…&content=Key`,
   `…/M1/M1HelperWeb.aspx?fx=`, backed by `m1.ickezhan.com` and an Alibaba FaaS host. Clear-text HTTP.
+
+## 6. Binary findings — T5577 write & (absence of) test mode  (CONFIRMED from nfcPro_x64.exe)
+
+The T5577 write builder is at `0x1400480a0`:
+`send_t5577(freq, flagsByte, block, *data, *pwd)` → `FF 00 66 00 1E <freq LE> 13 <flags> <block> <data:u32> <pwd:u32>`.
+
+- **No test mode / page / special flag.** All 30 call sites pass `flags = 0` (`xor edx,edx`). The
+  firmware exposes no test-mode write, so Proxmark-style unbrick (`lf t55 write -t`) is impossible
+  on this hardware. Only a Proxmark (direct RF) can revive a card whose password is unknown.
+- **Password-authenticated writes DO work.** The app's lock/set-password routine (`0x140065132`)
+  writes data `0x6E616954` ("Tian") while cycling the *password* arg through its key set:
+  `9A00F5C0, 00000000, 27049219, 48580B1C, 6E616954`. The password is sent as the dword's
+  little-endian bytes, i.e. wire `C0 F5 00 9A` for `0x9A00F5C0` — matching our dictionary strings.
+- Our "Unbrick" therefore sweeps known passwords on a block-0 = `000880E0` write (wrong pwd is
+  ignored by the chip; correct pwd resets config and the card reads again).
+- A bit-reverse lookup table lives at the data template block (used by the LF encoder / byte-order).
