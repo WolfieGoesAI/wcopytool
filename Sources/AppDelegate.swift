@@ -333,9 +333,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         return [(lfModeCmd(0x05, freq: freq), "LF read-mode"), (lfRead(freq: freq), "verify read")]
     }
 
-    // T5577 portion: normalize the password (block 7), then write blocks 1,2,0 with op12 (no pwd)
-    // then op13 (with pwd). Config 0x00148050, password "Tian" (or the Password field). Byte-for-byte
-    // the original app's sequence — this is what both writes and REVIVES a card.
     // The password to SET on the written card. Unchecked = unprotected (00000000). Checked = the
     // Password field (blank counts as 00000000). We never set "Tian" — it is only tried as a
     // CURRENT password to authenticate a card the original app previously locked.
@@ -360,7 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let (w1, w2) = em4100Words(id)
         let setPwd = targetPwd()
         // Config: PWD bit set (00148050) only when protecting; else PWD clear (00148040).
-        let cfg = protectOn() ? [0x00,0x14,0x80,0x50] : [0x00,0x14,0x80,0x40]
+        let cfg: [UInt8] = protectOn() ? [0x00,0x14,0x80,0x50] : [0x00,0x14,0x80,0x40]
         var seq: [([UInt8], String)] = []
         // Normalize: write block 7 = new password, authenticating with each candidate current key.
         for k in authKeys() { seq.append((lfT5Write(addr: 7, word: setPwd, pwd: k, freq: freq), "T5 set pwd (auth \(hex(k)))")) }
