@@ -134,7 +134,7 @@ class UsbReader(private val mgr: UsbManager) {
     private fun addDedup(l: ArrayList<IntArray>, k: IntArray) { if (l.none { eq(it, k) }) l.add(k) }
 
     // ---- identifying EM4305 unlock ----
-    fun unlockEM4305(keys: List<IntArray>, freq: Long, log: (String) -> Unit): String {
+    fun unlockEM4305(keys: List<IntArray>, freq: Long, log: (String) -> Unit, prog: ((Float) -> Unit)? = null): String {
         val orig = readEMId(freq) ?: run { log("no card"); return "no card" }
         val marker = orig xor 1
         val (mw1, mw2) = Proto.em4100Words(marker)
@@ -142,6 +142,7 @@ class UsbReader(private val mgr: UsbManager) {
         probe(intArrayOf(0, 0, 0, 0))
         if (readEMId(freq) == marker) { restoreEM(orig, null, freq); log("card has no password (not protected)"); return "no password" }
         for ((i, k) in keys.withIndex()) {
+            prog?.invoke((i + 1).toFloat() / keys.size)
             probe(k)
             if (readEMId(freq) == marker) { restoreEM(orig, k, freq); val ks = Proto.hexJoin(k); log("password is $ks"); return ks }
             if (i % 8 == 7) log("…tried ${i + 1}/${keys.size}")
@@ -159,7 +160,7 @@ class UsbReader(private val mgr: UsbManager) {
     }
 
     // ---- identifying T5577 unlock: find the key, restore id, clear protection ----
-    fun unlockT5577(keys: List<IntArray>, freq: Long, log: (String) -> Unit): String {
+    fun unlockT5577(keys: List<IntArray>, freq: Long, log: (String) -> Unit, prog: ((Float) -> Unit)? = null): String {
         val orig = readEMId(freq) ?: run { log("no card"); return "no card" }
         val marker = orig xor 1
         val (mw1, mw2) = Proto.em4100Words(marker)
@@ -189,6 +190,7 @@ class UsbReader(private val mgr: UsbManager) {
         log("precheck: protected — sweeping ${keys.size} key(s)")
         writeCommit(Proto.lfT5Write(7, z, z, freq))   // prime so the first key's write isn't the dropped one
         for ((i, k) in keys.withIndex()) {
+            prog?.invoke((i + 1).toFloat() / keys.size)
             // Clear block 7 with the candidate, then write the marker with password 0 — only the real
             // password lets block 7 clear, so only then does the pwd-0 marker write take. Each write is
             // committed twice with full settle so a dropped first attempt still lands.
@@ -232,13 +234,14 @@ class UsbReader(private val mgr: UsbManager) {
     }
 
     // ---- HID unlock → convert to plain EM4100, identifying the password ----
-    fun unlockHID(keys: List<IntArray>, emId: Long, freq: Long, log: (String) -> Unit): String {
+    fun unlockHID(keys: List<IntArray>, emId: Long, freq: Long, log: (String) -> Unit, prog: ((Float) -> Unit)? = null): String {
         transact(Proto.lfRFConfig(freq))
         readEMId(freq)?.let { log("already plain EM id %010X".format(it)); return "not locked" }
         val marker = if (emId == 0L) 1L else emId xor 1
         val (mw1, mw2) = Proto.em4100Words(marker)
         val open = Proto.u32be(0x00148040L)
         for ((i, k) in keys.withIndex()) {
+            prog?.invoke((i + 1).toFloat() / keys.size)
             val seq = listOf(
                 Proto.lfT5Write(7, intArrayOf(0,0,0,0), k, freq),
                 Proto.lfT5WriteNoPwd(1, Proto.u32be(mw1), freq), Proto.lfT5Write(1, Proto.u32be(mw1), intArrayOf(0,0,0,0), freq),

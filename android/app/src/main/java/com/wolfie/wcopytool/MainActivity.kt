@@ -53,6 +53,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var reader: UsbReader
     private val logLines = mutableStateListOf<String>()
     private val status = mutableStateOf("Not connected")
+    // Operation progress for the bottom bar: null = idle (hidden), <0 = busy/indeterminate, 0..1 = fraction.
+    private val progress = mutableStateOf<Float?>(null)
+    private fun setProgress(v: Float?) = runOnUiThread { progress.value = v }
     private val ACTION_PERM = "com.wolfie.wcopytool.USB_PERMISSION"
 
     private val receiver = object : BroadcastReceiver() {
@@ -98,7 +101,12 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun App() {
         val scope = rememberCoroutineScope()
-        fun go(block: () -> Unit) { scope.launch(Dispatchers.IO) { try { block() } catch (e: Exception) { log("error: ${e.message}") } } }
+        fun go(block: () -> Unit) {
+            scope.launch(Dispatchers.IO) {
+                setProgress(-1f)   // busy / indeterminate until an op reports a fraction
+                try { block() } catch (e: Exception) { log("error: ${e.message}") } finally { setProgress(null) }
+            }
+        }
 
         // shared state
         val freq = remember { mutableStateOf("125000") }
@@ -129,6 +137,14 @@ class MainActivity : ComponentActivity() {
                             else -> LogTab(logLines)
                         }
                     }
+                }
+                val p = progress.value
+                if (p != null) {
+                    Spacer(Modifier.height(6.dp))
+                    if (p < 0f) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    else LinearProgressIndicator(progress = { p }, modifier = Modifier.fillMaxWidth())
+                    Text(if (p < 0f) "Working…" else "Working… ${(p * 100).toInt()}%", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(4.dp))
                 }
             }
         }
@@ -161,12 +177,12 @@ class MainActivity : ComponentActivity() {
             Row {
                 Btn("Unlock T5577") { go {
                     val keys = reader.expandKeys(unlockKeys(keyText.value, t5Pwd.value, pwd.value, false), bitRev.value, byteRev.value)
-                    applyFound(t5Pwd, reader.unlockT5577(keys, f, ::log))
+                    applyFound(t5Pwd, reader.unlockT5577(keys, f, ::log) { setProgress(it) })
                 } }
                 Spacer(Modifier.width(8.dp))
                 Btn("Unlock EM4305") { go {
                     val keys = reader.expandKeys(unlockKeys(keyText.value, emPwd.value, pwd.value, true), bitRev.value, byteRev.value)
-                    applyFound(emPwd, reader.unlockEM4305(keys, f, ::log))
+                    applyFound(emPwd, reader.unlockEM4305(keys, f, ::log) { setProgress(it) })
                 } }
             }
             RevRow("Unlock also try:", bitRev, byteRev)
@@ -209,7 +225,7 @@ class MainActivity : ComponentActivity() {
             Row {
                 Btn("Unlock HID → EM") { go {
                     val keys = reader.expandKeys(unlockKeys(keyText.value, cur.value, pwd.value, false), bitRev.value, byteRev.value)
-                    applyFound(cur, reader.unlockHID(keys, 1L, Fmt.parseDec0(freq.value), ::log))
+                    applyFound(cur, reader.unlockHID(keys, 1L, Fmt.parseDec0(freq.value), ::log) { setProgress(it) })
                 } }
             }
             RevRow("Unlock also try:", bitRev, byteRev)
