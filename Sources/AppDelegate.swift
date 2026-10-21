@@ -50,10 +50,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let ntagData = NSTextField(string: "00000000")
     let idFreq = NSTextField(string: "125000")
     let lfWriteId = NSTextField(string: "1234567890")
+    let idFormat = NSPopUpButton()                    // how the Card # field is read/shown
+    var cardFmt = 0                                   // current Card # format index
+    let lfFormats = NSTextField(wrappingLabelWithString: "")   // Proxmark-style breakdown
     let lfPwd = NSTextField(string: "00000000")
     let lfProtect = NSButton(checkboxWithTitle: "Password-protect written card", target: nil, action: nil)
-    let lfChangePwd = NSButton(checkboxWithTitle: "Change the current password to", target: nil, action: nil)
-    let lfNewPwd = NSTextField(string: "00000000")
     let lfT5Found = NSTextField(string: "00000000")   // editable: found or user-entered password
     let lfEMFound = NSTextField(string: "00000000")
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
@@ -266,19 +267,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let readRow = hstack([ActionButton("Read ID (EM4100)") { [weak self] in
                                   guard let s = self else { return }
                                   s.sendPayload(lfRead(freq: parseU32(s.idFreq.stringValue)), "LF read EM4100") }])
+        // Card # with a format selector (how the field is read and displayed).
+        if idFormat.numberOfItems == 0 {
+            idFormat.addItems(withTitles: ["Decimal", "Hex (40-bit)", "DEZ 8", "DEZ 5.5", "Wiegand 26"])
+            idFormat.target = self; idFormat.action = #selector(idFormatChanged)
+            lfWriteId.target = self; lfWriteId.action = #selector(cardIdEdited)
+        }
         // Write — rewrites all LF chip types (T5577 + EM4305) the way the original app does.
-        let writeRow = hstack([labeled("Card #:", field(lfWriteId, 130)),
+        let writeRow = hstack([labeled("Card #:", field(lfWriteId, 130)), labeled("as", idFormat),
                                ActionButton("Write T5577") { [weak self] in self?.writeEM(false) },
                                ActionButton("Write EM4305") { [weak self] in self?.writeEM(true) },
                                ActionButton("Write all LF") { [weak self] in guard let s = self else { return }
-                                   s.writeLFAll(id: parseU40(s.lfWriteId.stringValue)) }])
-        // Protection for the written card: unchecked = no password; checked = set the password below
-        // (blank = 00000000). The written card's config PWD bit follows this checkbox.
+                                   s.writeLFAll(id: s.currentCardId()) }])
+        // All formats of the current id (Proxmark-style).
+        lfFormats.font = mono(10); lfFormats.textColor = .secondaryLabelColor; lfFormats.preferredMaxLayoutWidth = 900
+        refreshFormats(currentCardId())
+        // Protection for the written card: unchecked = no password; checked = lock with the password.
         let protectRow = hstack([lfProtect, labeled("Write Lock Password:", field(lfPwd, 100))])
-        // Change the stored password WITHOUT protecting (greyed out while Password-protect is on).
-        lfProtect.target = self; lfProtect.action = #selector(protectToggled)
-        let changeRow = hstack([lfChangePwd, field(lfNewPwd, 100)])
-        syncProtectGrey()
         // Unlock finds the card's current password (tries known keys + the password fields), clears
         // it, and writes the found password into the Unlock Password field.
         let foundRow = hstack([
@@ -286,9 +291,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ActionButton("Unlock T5577") { [weak self] in self?.unlockCard(false) },
             labeled("EM4305 Unlock Password:", field(lfEMFound, 100)),
             ActionButton("Unlock EM4305") { [weak self] in self?.unlockCard(true) }])
-        let warn = NSTextField(wrappingLabelWithString: "⚠︎ Write authenticates with the card\u{2019}s CURRENT password — the \u{201C}Unlock Password\u{201D} field for that chip (leave blank for an unprotected card); if it\u{2019}s wrong the write is simply rejected. Tick \u{201C}Password-protect\u{201D} to lock the written card with the Write Lock Password (config 00148050). Or tick \u{201C}Change the current password to\u{201D} to store a new password WITHOUT protecting the card (config 00148040). With neither ticked the card is written unprotected with password 0. Unlock finds the password by trying every known key plus the two password fields, clears it, and fills the found value into the Unlock Password field.")
-        warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
-        return vstack([head("125 kHz ID"), readRow, writeRow, protectRow, changeRow, foundRow, warn])
+        return vstack([head("125 kHz ID"), readRow, writeRow, lfFormats, protectRow, foundRow])
+    }
+
+    // ---- Card-number formats (EM4100 / Proxmark style) ----
+    // The 40-bit id is the canonical value; the Card # field shows/edits it in the selected format.
+    func parseCardId(_ s: String, _ fmt: Int) -> UInt64 {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        switch fmt {
+        case 1: return (UInt64(t.replacingOccurrences(of: "0x", with: "").replacingOccurrences(of: " ", with: ""), radix: 16) ?? 0) & 0xFF_FFFF_FFFF
+        case 2: return (UInt64(t) ?? 0) & 0xFF_FFFF          // DEZ 8 → lower 24 bits
+        case 3:                                               // DEZ 5.5 "AAAAA.BBBBB"
+            let p = t.split(separator: ".")
+            let a = p.count > 0 ? (UInt64(p[0]) ?? 0) : 0
+            let b = p.count > 1 ? (UInt64(p[1]) ?? 0) : 0
+            return ((a & 0xFFFF) << 16) | (b & 0xFFFF)
+        case 4:                                               // Wiegand 26 "FC,CN"
+            let p = t.split(whereSeparator: { $0 == "," || $0 == " " || $0 == ";" })
+            let fc = p.count > 0 ? (UInt64(p[0]) ?? 0) : 0
+            let cn = p.count > 1 ? (UInt64(p[1]) ?? 0) : 0
+            return wiegand26(fc, cn)
+        default: return (UInt64(t) ?? 0) & 0xFF_FFFF_FFFF    // Decimal (full 40-bit)
+        }
+    }
+    func formatCardId(_ id: UInt64, _ fmt: Int) -> String {
+        switch fmt {
+        case 1: return String(format: "%010llX", id)
+        case 2: return String(format: "%08llu", id & 0xFFFFFF)
+        case 3: return String(format: "%05llu.%05llu", (id >> 16) & 0xFFFF, id & 0xFFFF)
+        case 4: return "\((id >> 17) & 0xFF),\((id >> 1) & 0xFFFF)"
+        default: return String(id & 0xFF_FFFF_FFFF)
+        }
+    }
+    // H10301 26-bit Wiegand frame (even parity | 8 FC | 16 CN | odd parity) as a 26-bit number.
+    func wiegand26(_ fc: UInt64, _ cn: UInt64) -> UInt64 {
+        let f = fc & 0xFF, c = cn & 0xFFFF
+        let top12 = (f << 4) | ((c >> 12) & 0xF)
+        let bot12 = c & 0xFFF
+        let ep = UInt64(top12.nonzeroBitCount % 2)            // even parity over the top 12 data bits
+        let op = UInt64((bot12.nonzeroBitCount + 1) % 2)      // odd parity over the bottom 12 data bits
+        return (ep << 25) | (f << 17) | (c << 1) | op
+    }
+    func currentCardId() -> UInt64 { parseCardId(lfWriteId.stringValue, cardFmt) }
+    func setCardId(_ id: UInt64) { lfWriteId.stringValue = formatCardId(id, cardFmt); refreshFormats(id) }
+    func refreshFormats(_ id: UInt64) {
+        let fc = (id >> 17) & 0xFF, cn = (id >> 1) & 0xFFFF
+        lfFormats.stringValue = String(format:
+            "Hex (40-bit) : %010llX      Decimal : %llu\nDEZ 10 : %010llu   DEZ 8 : %08llu   DEZ 5.5 : %05llu.%05llu\nWiegand 26 : FC %llu  CN %llu",
+            id, id & 0xFF_FFFF_FFFF, id & 0xFFFFFFFF, id & 0xFFFFFF, (id >> 16) & 0xFFFF, id & 0xFFFF, fc, cn)
+    }
+    @objc func cardIdEdited() { refreshFormats(currentCardId()) }
+    @objc func idFormatChanged() {
+        let id = currentCardId()                              // parse with the OLD format
+        cardFmt = idFormat.indexOfSelectedItem                // switch
+        lfWriteId.stringValue = formatCardId(id, cardFmt)     // redisplay in the new format
+        refreshFormats(id)
     }
 
     // Send a timed sequence so the reader isn't overrun; replies arrive via the input callback.
@@ -311,7 +368,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // sequence. The original app writes BOTH in one pass (so a copy works whatever the chip is);
     // "Write all LF" / Revive does that.
     func writeEM(_ em4305: Bool) {
-        let id = parseU40(lfWriteId.stringValue)
+        let id = currentCardId()
         writeExpectId = id; writeExpectEM = em4305
         var seq = [(lfRFConfig(freq: parseU32(idFreq.stringValue)), "RF config"),
                    (lfModeCmd(0x14, freq: parseU32(idFreq.stringValue)), "LF begin")]
@@ -340,26 +397,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // Password field (blank counts as 00000000). We never set "Tian" — it is only tried as a
     // CURRENT password to authenticate a card the original app previously locked.
     func protectOn() -> Bool { lfProtect.state == .on }
-    func changePwdOn() -> Bool { lfChangePwd.state == .on }
-    @objc func protectToggled() { syncProtectGrey() }
-    // While Password-protect is on, the "Change the current password" controls are disabled.
-    func syncProtectGrey() {
-        let on = protectOn()
-        lfChangePwd.isEnabled = !on
-        lfNewPwd.isEnabled = !on
-        lfNewPwd.textColor = on ? .disabledControlTextColor : .controlTextColor
-    }
     // The NEW password to set: the Password field when the checkbox is ticked (blank = 00000000);
     // otherwise 00000000 (card left unprotected).
-    // The password to store (block 7 / word 2) on the next write:
-    //  • Protect ticked  → the Write Lock Password, and the card is write-protected (PWD bit set).
-    //  • Change ticked    → the new password, but the card is NOT protected (PWD bit clear).
-    //  • neither          → 0 (unprotected, password cleared).
-    func targetPwd() -> [UInt8] {
-        if protectOn() { return fieldKey(lfPwd.stringValue) }
-        if changePwdOn() { return fieldKey(lfNewPwd.stringValue) }
-        return [0,0,0,0]
-    }
+    // The password to store (block 7 / word 2) on the next write: the Write Lock Password when
+    // Password-protect is ticked (card write-protected), else 0 (unprotected).
+    func targetPwd() -> [UInt8] { protectOn() ? fieldKey(lfPwd.stringValue) : [0,0,0,0] }
     // Parse a text field as a 4-byte key only when it is exactly 8 hex digits; otherwise 0 (so
     // status text like "swept — now pwd 0" is treated as no password, not garbage).
     func fieldKey(_ s: String) -> [UInt8] {
@@ -853,7 +895,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                 log("  The device ACKs (02 07 00) but the chip still reads the old id. Use \u{201C}Revive LF (rewrite)\u{201D} or \u{201C}Write all LF\u{201D} — they normalise the password and write op12+op13, which is what the original app does to write/revive a protected card.")
             }
         }
-        else if let id = recEMid(bytes) { lfWriteId.stringValue = String(id) }  // Read ID → Card #
+        else if let id = recEMid(bytes) { setCardId(id) }  // Read ID → Card # (in the selected format)
     }
 
     func log(_ s: String) {
