@@ -319,14 +319,36 @@ func hidWiegand26(_ fc: UInt32, _ cn: UInt32) -> UInt32 {
     return (ep << 25) | (f << 17) | (c << 1) | op
 }
 
-// PROVISIONAL 26-bit HID → three T5577 data blocks (blocks 1,2,3). The leading HID preamble is
-// 0x1D (per the FSK2a format); the 27-bit "sentinel + 26-bit Wiegand" is placed after it, giving a
-// left-justified 96-bit pattern. This MUST be verified against a USB capture of the original app
-// writing a known HID card — the exact bit layout is not yet confirmed.
+// 26-bit HID (H10301) → three T5577 data blocks (blocks 1,2,3), VERIFIED byte-for-byte against a
+// capture of the original app (FC=123,CN=12345 → 1D555955 5565AA69 69556A5A).
+// Layout: 8-bit FSK preamble 00011101, then Manchester (0→01, 1→10) of
+//   [17-bit lead 00000010000000000] + [sentinel 1] + [26-bit Wiegand]  = 8 + 44*2 = 96 bits.
 func hidT5Blocks26(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
     let w = hidWiegand26(fc, cn)
-    let b1: UInt32 = (UInt32(0x1D) << 27) | (UInt32(1) << 26) | w   // preamble + sentinel + Wiegand
-    return [b1, 0x00000000, 0x00000000]                  // blocks 2,3 TBD — verify with a capture
+    var logical: [Int] = []
+    for ch in "00000010000000000" { logical.append(ch == "1" ? 1 : 0) }   // 17-bit lead
+    logical.append(1)                                                      // sentinel
+    for i in stride(from: 25, through: 0, by: -1) { logical.append(Int((w >> UInt32(i)) & 1)) }
+    var bits: [Int] = [0,0,0,1,1,1,0,1]                                    // 8-bit preamble
+    for b in logical { bits += (b == 0) ? [0,1] : [1,0] }                  // Manchester
+    var out = [UInt32](repeating: 0, count: 3)
+    for (i, bit) in bits.enumerated() { out[i/32] = (out[i/32] << 1) | UInt32(bit) }
+    return out
+}
+// HID read command (confirmed): FF 00 6A 01 00 08 → reply payload [0]=0x07 (HID), value in [4...].
+func hidReadCmd() -> [UInt8] { [0xFF, 0x00, 0x6A, 0x01, 0x00, 0x08] }
+// Decode a type-0x07 HID reply payload → (raw value, bit length, FC, CN). The value's highest set
+// bit is the HID format sentinel; the bits below it are the Wiegand frame.
+func hidDecodeReply(_ p: [UInt8]) -> (raw: UInt64, bits: Int, fc: UInt32, cn: UInt32)? {
+    guard p.count >= 5, p[0] == 0x07 else { return nil }
+    var raw: UInt64 = 0
+    for b in p[4...] { raw = (raw << 8) | UInt64(b) }
+    guard raw != 0 else { return nil }
+    let h = 63 - raw.leadingZeroBitCount                 // sentinel = highest set bit → format length
+    let frame = raw & ((UInt64(1) << UInt64(h)) - 1)     // Wiegand frame (sentinel stripped)
+    var fc: UInt32 = 0, cn: UInt32 = 0
+    if h == 26 { fc = UInt32((frame >> 17) & 0xFF); cn = UInt32((frame >> 1) & 0xFFFF) }
+    return (raw, h, fc, cn)
 }
 
 func parseU40(_ s: String) -> UInt64 {

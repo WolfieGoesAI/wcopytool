@@ -352,18 +352,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         refreshFormats(id)
     }
 
-    // ---- HID Prox (LF, T5577 FSK2a emulation) ----
+    // ---- HID Prox (LF, T5577 FSK2a emulation) — read & write verified against the original app ----
     func pageHID() -> NSView {
         hidFC.target = self; hidFC.action = #selector(hidEdited)
         hidCN.target = self; hidCN.action = #selector(hidEdited)
         let row = hstack([labeled("Facility code:", field(hidFC, 80)),
                           labeled("Card number:", field(hidCN, 100)),
-                          ActionButton("Write HID 26-bit (T5577)") { [weak self] in self?.writeHID() }])
+                          ActionButton("Read HID") { [weak self] in self?.readHID() },
+                          ActionButton("Write HID 26-bit") { [weak self] in self?.writeHID() }])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
-        let warn = NSTextField(wrappingLabelWithString: "⚠︎ HID-Prox support is in progress. Confirmed from the original app: T5577 config 00107060 (FSK2a, RF/50), data in blocks 1–3. The exact FSK bit layout of those 3 blocks is NOT yet verified — the write below uses a provisional encoding and will likely not be read by a real HID reader until it is confirmed with a USB capture of the original app writing a known HID card.")
-        warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
+        let note = NSTextField(wrappingLabelWithString: "HID Prox 26-bit (H10301) on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Read returns the card's FC/CN. 27/34/35/37-bit, AWID, FDX-B and Paradox will follow once captured.")
+        note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         hidRefresh()
-        return vstack([head("HID Prox 26-bit (H10301)"), row, hidInfo, warn])
+        return vstack([head("HID Prox 26-bit (H10301)"), row, hidInfo, note])
     }
     @objc func hidEdited() { hidRefresh() }
     func hidRefresh() {
@@ -371,20 +372,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let w = hidWiegand26(fc, cn)
         let b = hidT5Blocks26(fc, cn)
         hidInfo.stringValue = String(format:
-            "Wiegand 26 : %08X   (FC %u, CN %u)\nT55x7 cfg  : 00107060   blk1 %08X  blk2 %08X  blk3 %08X  (provisional)",
+            "Wiegand 26 : %07X   (FC %u, CN %u)\nT55x7 cfg  : 00107060   blk1 %08X  blk2 %08X  blk3 %08X",
             w, fc, cn, b[0], b[1], b[2])
     }
     func writeHID() {
-        guard recPhase == .idle, !ulActive else { log("busy — another operation is running"); return }
+        guard recPhase == .idle, !ulActive, !hidReadActive else { log("busy — another operation is running"); return }
         let fc = parseU32(hidFC.stringValue), cn = parseU32(hidCN.stringValue)
         let freq = parseU32(idFreq.stringValue)
         let data = hidT5Blocks26(fc, cn)
         let setPwd = targetPwd()
-        log(String(format: "HID 26-bit write FC=%u CN=%u → blocks %08X %08X %08X, config 00107060 (PROVISIONAL encoding)", fc, cn, data[0], data[1], data[2]))
-        var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config"), (lfModeCmd(0x14, freq: freq), "LF begin")]
-        for c in writeAuthCands(lfT5Found) {
-            seq.append((lfT5Write(addr: 7, word: setPwd, pwd: c, freq: freq), "block7 = pwd (auth \(hexJoin(c)))"))
-        }
+        log(String(format: "HID 26-bit write FC=%u CN=%u → blocks %08X %08X %08X, config 00107060", fc, cn, data[0], data[1], data[2]))
+        var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config")]
+        // Authenticate with the current password (Unlock field, 0, or the known keys) and set block 7.
+        var cands = writeAuthCands(lfT5Found)
+        for k in kT5NormalizeKeys { let kb = keyBytes(k); if !cands.contains(where: { $0 == kb }) { cands.append(kb) } }
+        for c in cands { seq.append((lfT5Write(addr: 7, word: setPwd, pwd: c, freq: freq), "block7 = pwd (auth \(hexJoin(c)))")) }
         let blocks: [(UInt8, [UInt8], String)] = [
             (1, u32be(data[0]), "HID blk1"), (2, u32be(data[1]), "HID blk2"),
             (3, u32be(data[2]), "HID blk3"), (0, kT5HIDConfigWire, "HID config 00107060")]
@@ -392,8 +394,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             seq.append((lfT5WriteNoPwd(addr: blk, word: d, freq: freq), "\(name) op12"))
             seq.append((lfT5Write(addr: blk, word: d, pwd: setPwd, freq: freq), "\(name) op13"))
         }
-        seq.append((lfModeCmd(0x05, freq: freq), "LF read-mode"))
+        seq.append((lfModeCmd(0x64, freq: freq), "HID finalize"))   // the op00/0x64 the original sends
         sendSeq(seq, gap: 0.28)
+    }
+    var hidReadActive = false
+    var hidReadRetries = 0
+    func readHID() {
+        guard recPhase == .idle, !ulActive, !hidReadActive else { log("busy — another operation is running"); return }
+        hidReadActive = true; hidReadRetries = 0
+        log("Read HID…")
+        sendPayload(lfRFConfig(freq: parseU32(idFreq.stringValue)), "RF config")
+        afterDelay(0.25) { [weak self] in self?.sendPayload(hidReadCmd(), "read HID") }
+    }
+    func handleHIDRead(_ bytes: [UInt8]) {
+        guard let (p, _, _, _) = Frame.parse(bytes) else { return }
+        if let r = hidDecodeReply(p), r.bits == 26 {
+            hidReadActive = false
+            hidFC.stringValue = String(r.fc); hidCN.stringValue = String(r.cn); hidRefresh()
+            log(String(format: "✓ HID read: FC=%u CN=%u  (raw %llX, %d-bit)", r.fc, r.cn, r.raw, r.bits))
+        } else if hidReadRetries < 8 {
+            hidReadRetries += 1
+            afterDelay(0.2) { [weak self] in self?.sendPayload(hidReadCmd(), "read HID") }
+        } else {
+            hidReadActive = false
+            log("✗ HID read: no HID card detected.")
+        }
     }
 
     // Send a timed sequence so the reader isn't overrun; replies arrive via the input callback.
@@ -933,6 +958,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fPayload.stringValue = p.payloadHex.isEmpty ? "—" : p.payloadHex
         fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
         if recPhase != .idle { handleRecovery(bytes) }
+        else if hidReadActive { handleHIDRead(bytes) }
         else if ulActive { handleUnlock(bytes) }
         else if let want = writeExpectId, let id = recEMid(bytes) {   // verify a write actually took
             writeExpectId = nil
