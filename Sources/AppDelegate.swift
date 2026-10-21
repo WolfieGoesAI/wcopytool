@@ -21,7 +21,7 @@ final class ActionButton: NSButton {
     @objc private func fire() { onClick?() }
 }
 
-enum RecPhase { case idle, readOrig, verify }
+enum RecPhase { case idle, baseline, probe }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
@@ -290,8 +290,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                                ActionButton("Write T5577") { [weak self] in self?.writeEM(false) },
                                ActionButton("Write EM4305") { [weak self] in self?.writeEM(true) }])
         let pwdRow = hstack([labeled("Password:", field(lfPwd, 100)),
-                             ActionButton("Find T5577 pwd") { [weak self] in self?.findPwd(false) },
-                             ActionButton("Find EM4305 pwd") { [weak self] in self?.findPwd(true) }])
+                             ActionButton("Find T5577 pwd (read)") { [weak self] in self?.findPwd(false) },
+                             ActionButton("Find EM4305 pwd (read)") { [weak self] in self?.findPwd(true) }])
         // Found/entered password per chip (editable) + Unlock (rewrite id, clear protection & password).
         let foundRow = hstack([
             labeled("T5577 pwd:", field(lfT5Found, 100)),
@@ -302,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                              labeled("Word (hex):", field(lfWord, 100)),
                              ActionButton("Write T5577 word") { [weak self] in self?.writeBlockManual(false) },
                              ActionButton("Write EM4305 word") { [weak self] in self?.writeBlockManual(true) }])
-        let warn = NSTextField(wrappingLabelWithString: "⚠︎ EM4100 data write only (no password/lock). T5577 op 0x13 is verified working; EM4305 op 0x12 uses the same frame/encoder — test on a spare EM4305 and check the auto read-back (its config word may differ from T5577's 00148040). HID-prox formats and lock/unlock keys are the next staged steps.")
+        let warn = NSTextField(wrappingLabelWithString: "⚠︎ \u{201C}Find pwd (read)\u{201D} is non-destructive: it tests passwords by READING only (T5577 password-read, EM4305 login+read) and never writes, so it can\u{2019}t brick a card. It can only find a password on a read-protected card; a card that already reads without a password is write-protected only, and its write password can\u{2019}t be found by reading. Unlock/Write do write to the card. \u{201C}Unbrick T5577\u{201D} rewrites block 0 in test mode (older T5577 only) to revive a card that went dark.")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
         let note = NSTextField(wrappingLabelWithString: "Read ID uses FF 00 65 05 1E <freq> 00 00 00 00 → 5-byte EM4100 id. 0x68 = model/firmware, 0x69 = serial. 0x65 experimenter is for probing other LF modes.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
@@ -401,176 +401,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     // ---- Write-test password recovery (state machine) ----
-    // For each candidate key: write a marker id with that key, read back. The key that makes the
-    // read change to the marker is the card's password; the original id is then restored.
+    // READ-ONLY password search — it never writes a block, so it can NEVER brick the card
+    // (important: newer T5577s have no test mode, so there is no after-the-fact unbrick).
+    //   T5577  — password-read: 0x65 read with the candidate in the password field (lfReadPwd).
+    //   EM4305 — login (op 0x21, authenticate only) then read.
+    // A hit is a candidate that yields a stable, valid EM id when the no-password read did not.
+    // If the card reads fine WITHOUT a password it is not read-protected, so its write-password
+    // cannot be observed by reading — we stop and say so rather than fall back to writes.
     var recPhase: RecPhase = .idle
     var recEM = false
     var recCands: [(String,[UInt8])] = []
     var recIdx = 0
-    var recOrig: UInt64 = 0
-    var recMarker: UInt64 = 0
     var recFreq: UInt32 = 125000
-    // Reply-gated sequencing: each command is sent only after the previous one's reply arrives,
-    // so a slow T5577 write finishes before the next command (no fixed-timer hammering).
-    var recWriteQueue: [([UInt8],String)] = []  // writes left to send for the current candidate
-    var recAwaitVerify = false // waiting for the verify read's reply
-    var recVerifyRetries = 0
-    var recReadRetries = 0
-    var recConfirming = false  // second read to confirm a marker hit (guards read noise)
-    var recSamples: [UInt64] = []   // initial reads, to learn which bits flicker
-    var recStableMask: UInt64 = 0   // bits the card reads consistently
-    let recSettle = 0.25            // pause after writes before reading back (let the card commit)
-    let recStepGap = 0.06           // small pause between reply-gated commands
+    var recSamples: [UInt64] = []    // valid ids seen during the no-password baseline
+    var recAttempts = 0              // total baseline reads attempted
+    var recProbe: [UInt64?] = []     // reads collected for the current candidate
+    var recEvaluate = true           // false while an EM4305 login is in flight (ignore its reply)
+    let recReadGap = 0.12            // gentle spacing between reads
+    let recBaselineCount = 4         // no-password reads used to decide read-protection
+    let recProbeCount = 2            // reads per candidate; a hit must be valid & equal on all
 
     func afterDelay(_ d: Double, _ f: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + d, execute: f) }
 
-    // A read indicates the marker was written iff it matches on every stable bit.
-    func recMatchesMarker(_ id: UInt64) -> Bool { (id & recStableMask) == (recMarker & recStableMask) }
-
     func findPwd(_ em4305: Bool) {
         guard recPhase == .idle, !unlockActive else { log("busy — another operation is running"); return }
-        if !confirm("Password write-test can brick the card",
-                    "Finding the password works by writing test data to the card for every candidate "
-                    + "key. On a password-protected T5577 these writes can reach the chip even when the "
-                    + "reader reports no-ack, and may leave block 0 in a state this reader no longer reads "
-                    + "(the card will still read on an X7 or the PC app). Keep the card perfectly still. "
-                    + "If it goes dark afterwards, use \u{201C}Unbrick T5577\u{201D}, or revive it with the PC app.",
-                    ok: "Run write-test") {
-            log("Find password cancelled.")
-            (em4305 ? lfEMFound : lfT5Found).stringValue = ""
-            return
-        }
         recEM = em4305; recFreq = parseU32(idFreq.stringValue)
-        (em4305 ? lfEMFound : lfT5Found).stringValue = "searching…"
         recCands = kLFKeyDict.flatMap { k in keyForms(k).map { (k + $0.0, $0.1) } }
-        recIdx = 0; recPhase = .readOrig; recReadRetries = 0; recSamples = []
-        log("Find \(em4305 ? "EM4305" : "T5577") password: sampling current id…")
-        sendPayload(lfRead(freq: recFreq), "sample id")
+        recIdx = 0; recSamples = []; recAttempts = 0; recEvaluate = true
+        recPhase = .baseline
+        (em4305 ? lfEMFound : lfT5Found).stringValue = "testing…"
+        log("Find \(em4305 ? "EM4305" : "T5577") password (read-only — no writes): checking whether the card reads without a password…")
+        sendPayload(lfRead(freq: recFreq), "baseline read")
     }
     func recEMid(_ bytes: [UInt8]) -> UInt64? {
         guard let (p, _, _, _) = Frame.parse(bytes), p.count == 6, p[0] == 0x05 else { return nil }
         return p[1...5].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
     }
-    // Build the write list for a candidate and start stepping through it (reply-gated).
-    func recSendWrites(id: UInt64, key: [UInt8], label: String) {
-        let (w1, w2) = em4100Words(id)
+    // Send one read sample for a candidate. T5577: a password-read. EM4305: login (auth only)
+    // then read — the login reply is ignored (recEvaluate=false) so only the read counts.
+    // Neither path writes any block.
+    func recSendSample(_ key: [UInt8], _ label: String) {
         if recEM {
-            recWriteQueue = [
-                (em4305LoginBytes(pwd: key, freq: recFreq), "login \(label)"),
-                (em4305WriteWord(addr: 5, bytes: u32be(w1), freq: recFreq), "w5"),
-                (em4305WriteWord(addr: 6, bytes: u32be(w2), freq: recFreq), "w6"),
-            ]
+            recEvaluate = false
+            sendPayload(em4305LoginBytes(pwd: key, freq: recFreq), "login \(label)")
+            afterDelay(recReadGap) { [weak self] in guard let s = self else { return }
+                s.recEvaluate = true
+                s.sendPayload(lfRead(freq: s.recFreq), "probe \(label)") }
         } else {
-            recWriteQueue = [
-                (lfT5Write(addr: 1, word: u32be(w1), pwd: key, freq: recFreq), "blk1 \(label)"),
-                (lfT5Write(addr: 2, word: u32be(w2), pwd: key, freq: recFreq), "blk2"),
-            ]
-        }
-        recAwaitVerify = false; recConfirming = false
-        recStep()
-    }
-    // Send the next queued write, or (queue empty) the verify read after a settle pause.
-    func recStep() {
-        if !recWriteQueue.isEmpty {
-            let cmd = recWriteQueue.removeFirst()
-            afterDelay(recStepGap) { [weak self] in self?.sendPayload(cmd.0, cmd.1) }
-        } else {
-            recAwaitVerify = true; recVerifyRetries = 0
-            afterDelay(recSettle) { [weak self] in guard let s = self else { return }
-                s.sendPayload(lfRead(freq: s.recFreq), "verify") }
+            recEvaluate = true
+            sendPayload(lfReadPwd(pwd: key, freq: recFreq), "probe \(label)")
         }
     }
     func tryRecCandidate() {
         guard recIdx < recCands.count else {
-            log("✗ password not found in dictionary (\(recCands.count) tried).")
-            if !recEM {
-                log("  If the card no longer reads here (it may still read on X7/PC), run \u{201C}Unbrick T5577\u{201D} to rewrite block 0, then re-read.")
-            }
+            log("✗ password not found in the dictionary (\(recCands.count) tried). The card was only read, never written — it is unchanged.")
             (recEM ? lfEMFound : lfT5Found).stringValue = "not found"
             recPhase = .idle; return
         }
+        recProbe = []
         let (label, key) = recCands[recIdx]
-        recSendWrites(id: recMarker, key: key, label: label)
-    }
-    func recFound() {
-        let (label, key) = recCands[recIdx]
-        recPhase = .idle
-        (recEM ? lfEMFound : lfT5Found).stringValue = key.map { String(format: "%02X", $0) }.joined()
-        log("✓ PASSWORD FOUND: \(label)  (wire \(hex(key))) — restoring original id")
-        let (w1, w2) = em4100Words(recOrig)
-        var seq: [([UInt8],String)]
-        if recEM {
-            seq = [(em4305LoginBytes(pwd: key, freq: recFreq), "login"),
-                   (em4305WriteWord(addr: 5, bytes: u32be(w1), freq: recFreq), "w5"),
-                   (em4305WriteWord(addr: 6, bytes: u32be(w2), freq: recFreq), "w6"),
-                   (lfRead(freq: recFreq), "read")]
-        } else {
-            seq = [(lfT5Write(addr: 1, word: u32be(w1), pwd: key, freq: recFreq), "blk1"),
-                   (lfT5Write(addr: 2, word: u32be(w2), pwd: key, freq: recFreq), "blk2"),
-                   (lfRead(freq: recFreq), "read")]
-        }
-        sendSeq(seq, gap: 0.3)
+        recSendSample(key, label)
     }
     func handleRecovery(_ bytes: [UInt8]) {
+        if !recEvaluate { return }               // ignore an EM4305 login reply; wait for the read
         let emid = recEMid(bytes)
         switch recPhase {
-        case .readOrig:
-            if let id = emid {
-                recSamples.append(id)
-                if recSamples.count < 6 {                 // keep sampling to learn flicker
-                    sendPayload(lfRead(freq: recFreq), "sample id")
-                    return
-                }
-                // unstable bits = any that differ across samples; keep the majority value.
-                var unstable: UInt64 = 0
-                for s in recSamples { unstable |= (s ^ recSamples[0]) }
-                recStableMask = (~unstable) & 0xFF_FFFF_FFFF
-                var counts: [UInt64: Int] = [:]
-                for s in recSamples { counts[s, default: 0] += 1 }
-                recOrig = counts.max { $0.value < $1.value }!.key
-                recMarker = recOrig ^ recStableMask        // flip all stable bits → card can't read this itself
-                if recStableMask.nonzeroBitCount < 8 {
-                    log("✗ card read too unstable to test reliably; aborting")
-                    (recEM ? lfEMFound : lfT5Found).stringValue = "unstable read"
-                    recPhase = .idle; return
-                }
-                recIdx = 0; recPhase = .verify
-                log(String(format: "id=%010llX stable=%010llX marker=%010llX — sweeping %d candidates",
-                           recOrig, recStableMask, recMarker, recCands.count))
-                tryRecCandidate()
-            } else if recReadRetries < 8 {
-                recReadRetries += 1
-                sendPayload(lfRead(freq: recFreq), "re-sample id")
-            } else {
-                log("✗ no card detected to read; aborting")
-                (recEM ? lfEMFound : lfT5Found).stringValue = "no card"
-                recPhase = .idle
-            }
-        case .verify:
-            if !recAwaitVerify {                 // a write was just acked → send the next command
-                recStep()
+        case .baseline:
+            recAttempts += 1
+            if let id = emid { recSamples.append(id) }
+            if recAttempts < recBaselineCount {
+                afterDelay(recReadGap) { [weak self] in guard let s = self else { return }
+                    s.sendPayload(lfRead(freq: s.recFreq), "baseline read") }
                 return
             }
-            if let id = emid {
-                if recMatchesMarker(id) {
-                    if recConfirming {                 // confirmed twice → real hit
-                        recAwaitVerify = false; recConfirming = false; recFound()
-                    } else {                            // first hit → read again to confirm
-                        recConfirming = true
-                        afterDelay(recStepGap) { [weak self] in guard let s = self else { return }
-                            s.sendPayload(lfRead(freq: s.recFreq), "confirm") }
-                    }
-                } else {                                // not the marker → wrong key, next candidate
-                    recAwaitVerify = false; recConfirming = false
-                    recIdx += 1; tryRecCandidate()
-                }
-            } else if recVerifyRetries < 4 {            // no-card read → retry a few times
-                recVerifyRetries += 1
-                afterDelay(recSettle) { [weak self] in guard let s = self else { return }
-                    s.sendPayload(lfRead(freq: s.recFreq), "verify retry") }
+            if recSamples.count * 2 >= recBaselineCount {   // reads fine without a password
+                let id = recSamples.first ?? 0
+                log(String(format: "Card reads without a password (id=%010llX) — it is not read-protected.", id))
+                log("  Its WRITE password cannot be found by reading, and this tool will not write to a card to test passwords. If you know the password, type it in the field and use Unlock/Write.")
+                (recEM ? lfEMFound : lfT5Found).stringValue = "reads w/o pwd"
+                recPhase = .idle
+            } else {                                         // silent without a password → read-protected
+                log("Card does not read without a password → read-protected. Sweeping \(recCands.count) candidates by \(recEM ? "login" : "password-read") (read-only)…")
+                recIdx = 0; recPhase = .probe
+                tryRecCandidate()
+            }
+        case .probe:
+            recProbe.append(emid)
+            let (label, key) = recCands[recIdx]
+            if recProbe.count < recProbeCount {
+                afterDelay(recReadGap) { [weak self] in self?.recSendSample(key, label) }
+                return
+            }
+            let ids = recProbe.compactMap { $0 }
+            if ids.count == recProbe.count, let first = ids.first, ids.allSatisfy({ $0 == first }) {
+                recPhase = .idle                             // stable valid id on every read → hit
+                (recEM ? lfEMFound : lfT5Found).stringValue = key.map { String(format: "%02X", $0) }.joined()
+                log(String(format: "✓ PASSWORD FOUND: %@ (wire %@) — card now reads id=%010llX. No writes were made.",
+                           label, hex(key), first))
             } else {
-                recAwaitVerify = false; recConfirming = false
-                recIdx += 1; tryRecCandidate()
+                recIdx += 1
+                afterDelay(recReadGap) { [weak self] in self?.tryRecCandidate() }
             }
         case .idle:
             break
