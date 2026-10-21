@@ -278,13 +278,14 @@ class MainActivity : ComponentActivity() {
     @Composable fun LogTab(lines: SnapshotStateList<String>) {
         val clip = LocalClipboardManager.current
         val text = lines.joinToString("\n")
-        Column(Modifier.fillMaxSize()) {
+        // No verticalScroll here: the pager wraps every page in a scrolling Box already,
+        // and nesting two vertical scrollers crashes. SelectionContainer gives long-press copy.
+        Column {
             Row {
                 TextButton(onClick = { clip.setText(AnnotatedString(text)) }) { Text("Copy all") }
                 TextButton(onClick = { lines.clear() }) { Text("Clear log") }
             }
-            // SelectionContainer lets the user long-press to select and copy any part of the log.
-            SelectionContainer(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            SelectionContainer {
                 Text(text, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
             }
         }

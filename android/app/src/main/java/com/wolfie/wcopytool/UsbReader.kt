@@ -179,22 +179,31 @@ class UsbReader(private val mgr: UsbManager) {
         }
         log("not found in ${keys.size} keys"); return "not found"
     }
-    // Leave the card UNPROTECTED. Block 7 is already 0 (cleared during the probe with the found key),
-    // so authenticate with password 0 (op13) to write block 0 = 00148040 which clears the PWD bit, then
-    // reassert/restore with op12. This exact sequence is the one confirmed to leave the card open.
+    // Leave the card UNPROTECTED. After the sweep, block 7 is 0 (cleared with the found key) but the PWD
+    // bit in block 0 is still set, so the card is "protected with password 0". Clear the PWD bit by writing
+    // block 0 = 00148040 authenticated with password 0 (op13), with generous settle time, then VERIFY the
+    // card really ended unprotected and log the result so the failing step is unambiguous.
     private fun restoreT5(id: Long, foundKey: IntArray, freq: Long, log: (String) -> Unit) {
         val (w1, w2) = Proto.em4100Words(id)
         val z = intArrayOf(0, 0, 0, 0)
         val open = Proto.u32be(0x00148040L)
-        sendSeq(listOf(
-            Proto.lfT5Write(7, z, z, freq),                  // block 7 = 0 (auth 0)
-            Proto.lfT5Write(0, open, z, freq),               // block 0 = 00148040 (auth 0) — clears PWD bit
-            Proto.lfT5WriteNoPwd(0, open, freq),             // reassert config (op12, now open)
-            Proto.lfT5Write(1, Proto.u32be(w1), z, freq), Proto.lfT5WriteNoPwd(1, Proto.u32be(w1), freq),
-            Proto.lfT5Write(2, Proto.u32be(w2), z, freq), Proto.lfT5WriteNoPwd(2, Proto.u32be(w2), freq),
-            Proto.lfModeCmd(0x05, freq)
-        )) {}
-        log("restore: rewrote id=%010X unprotected".format(id))
+        transact(Proto.lfT5Write(7, z, z, freq)); Thread.sleep(150)      // block 7 = 0 (auth 0)
+        transact(Proto.lfT5Write(0, open, z, freq)); Thread.sleep(260)   // block 0 = 00148040 (auth 0) clears PWD bit
+        transact(Proto.lfT5WriteNoPwd(0, open, freq)); Thread.sleep(150) // reassert config (op12)
+        // Verify: a marker write authenticated with password 0 commits only if the card is now open.
+        val marker = id xor 1
+        val (mk1, mk2) = Proto.em4100Words(marker)
+        transact(Proto.lfT5Write(1, Proto.u32be(mk1), z, freq))
+        transact(Proto.lfT5Write(2, Proto.u32be(mk2), z, freq))
+        Thread.sleep(200)
+        val chk = readEMId(freq)
+        if (chk == marker) log("restore verify: UNPROTECTED ok (readback=%010X)".format(chk))
+        else log("restore verify: STILL PROTECTED (readback=%010X want %010X)".format(chk ?: -1L, marker))
+        // Write the real id back (auth 0).
+        transact(Proto.lfT5Write(1, Proto.u32be(w1), z, freq)); transact(Proto.lfT5WriteNoPwd(1, Proto.u32be(w1), freq))
+        transact(Proto.lfT5Write(2, Proto.u32be(w2), z, freq)); transact(Proto.lfT5WriteNoPwd(2, Proto.u32be(w2), freq))
+        transact(Proto.lfModeCmd(0x05, freq)); Thread.sleep(100)
+        log("restore: rewrote id=%010X".format(id))
     }
 
     // ---- HID unlock → convert to plain EM4100, identifying the password ----
