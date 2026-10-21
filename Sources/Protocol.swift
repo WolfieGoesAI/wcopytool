@@ -237,8 +237,17 @@ func lfReadPwd(pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
 // Password-aware LF write helpers (byte-array form avoids endianness confusion).
 //   T5577 block write (op 0x13): data word + password word (password = 0 for unprotected).
 func lfT5Write(addr: UInt8, word: [UInt8], pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
-    [0xFF,0x00,0x66,0x00,0x1E] + u32le(freq) + [0x13,0x00,addr] + pad4(word) + pad4(pwd)
+    lfT5WriteMode(addr: addr, word: word, pwd: pwd, freq: freq, mode: 0x00)
 }
+//   T5577 block write with an explicit mode/flag byte (the byte between op 0x13 and the block
+//   number — always 0x00 in normal writes). Used by the test-mode unbrick to probe whether the
+//   firmware exposes Proxmark-style test mode / downlink waveforms (r0..r3) for block-0 recovery.
+func lfT5WriteMode(addr: UInt8, word: [UInt8], pwd: [UInt8], freq: UInt32 = 125000, mode: UInt8) -> [UInt8] {
+    [0xFF,0x00,0x66,0x00,0x1E] + u32le(freq) + [0x13,mode,addr] + pad4(word) + pad4(pwd)
+}
+// Proxmark T5577 unbrick/reset config written to block 0 in test mode (lf t55 write -b 0 -d 000880E0 -t).
+// A safe, readable default modulation that revives a card whose block 0 got corrupted.
+let kT5UnbrickConfig: UInt32 = 0x000880E0
 //   EM4305 login (op 0x21) with a given password.
 func em4305LoginBytes(pwd: [UInt8], freq: UInt32 = 125000) -> [UInt8] {
     [0xFF,0x00,0x66,0x00,0x1E] + u32le(freq) + [0x21] + pad4(pwd)

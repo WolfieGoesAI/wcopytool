@@ -262,6 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             ActionButton("Device info (0x68)") { [weak self] in self?.sendPayload([0xFF,0x00,0x68], "device info") },
             ActionButton("Serial number (0x69)") { [weak self] in self?.sendPayload([0xFF,0x00,0x69], "serial") },
             ActionButton("Init / Reset reader") { [weak self] in self?.resetReader() },
+            ActionButton("Unbrick T5577 (test mode)") { [weak self] in self?.unbrickT5() },
         ])
         // Confirmed LF read: FF 00 65 05 1E <freq> 00 00 00 00 → reply 02 0C 01 00 05 <5-byte EM id> CHK FD
         let readRow = hstack([labeled("Freq (Hz):", field(idFreq, 90)),
@@ -326,6 +327,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             (rfcfg, "RF config 0x1F"),
             (lfRead(freq: f), "read"),
         ], gap: 0.3)
+    }
+
+    // T5577 "unbrick" — rewrite block 0 with a safe default config (0x000880E0) in test mode,
+    // mirroring Proxmark's recovery (lf t55 write -b 0 -d 000880E0 -t, then --r0..--r3 -t).
+    // Test mode bypasses the password; the downlink-mode sweep (flag byte) covers a card that only
+    // answers to one waveform. Writes are well-spaced so a confused card isn't hammered.
+    // NOTE: whether this firmware honours the test-mode/flag byte is unproven — if the card stays
+    // dark, revive it with the PC app or X7 (both confirmed working), then reprogram here.
+    func unbrickT5() {
+        let f = parseU32(idFreq.stringValue)
+        let cfg = u32be(kT5UnbrickConfig)
+        let pwd = currentPwd()                       // try the entered password too, in case block 0 needs auth
+        log(String(format: "Unbrick T5577: writing block0 = %08X in test mode, sweeping downlink modes…", kT5UnbrickConfig))
+        var seq: [([UInt8], String)] = []
+        // mode byte: 0x00 = default/test, 0x01..0x03 emulate Proxmark downlink r1..r3. High bit as a
+        // test-mode guess. pwd=0 first (true test mode needs none), then the entered password.
+        for (name, mode) in [("test", UInt8(0x00)), ("r1", 0x01), ("r2", 0x02), ("r3", 0x03), ("test|hi", 0x80)] {
+            seq.append((lfT5WriteMode(addr: 0, word: cfg, pwd: [0,0,0,0], freq: f, mode: mode), "blk0 \(name) pwd0"))
+        }
+        if pwd != [0,0,0,0] {
+            seq.append((lfT5WriteMode(addr: 0, word: cfg, pwd: pwd, freq: f, mode: 0x00), "blk0 test pwd=\(hex(pwd))"))
+        }
+        seq.append((lfRead(freq: f), "read after unbrick"))
+        sendSeq(seq, gap: 0.45)
+    }
+
+    // Modal yes/no confirmation. Returns true if the user approves (always true in a headless run).
+    func confirm(_ title: String, _ info: String, ok: String = "Proceed") -> Bool {
+        let a = NSAlert()
+        a.messageText = title; a.informativeText = info; a.alertStyle = .warning
+        a.addButton(withTitle: ok); a.addButton(withTitle: "Cancel")
+        return a.runModal() == .alertFirstButtonReturn
     }
 
     // Send a timed sequence so the reader isn't overrun; replies arrive via the input callback.
@@ -396,6 +429,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     func findPwd(_ em4305: Bool) {
         guard recPhase == .idle, !unlockActive else { log("busy — another operation is running"); return }
+        if !confirm("Password write-test can brick the card",
+                    "Finding the password works by writing test data to the card for every candidate "
+                    + "key. On a password-protected T5577 these writes can reach the chip even when the "
+                    + "reader reports no-ack, and may leave block 0 in a state this reader no longer reads "
+                    + "(the card will still read on an X7 or the PC app). Keep the card perfectly still. "
+                    + "If it goes dark afterwards, use \u{201C}Unbrick T5577\u{201D}, or revive it with the PC app.",
+                    ok: "Run write-test") {
+            log("Find password cancelled.")
+            (em4305 ? lfEMFound : lfT5Found).stringValue = ""
+            return
+        }
         recEM = em4305; recFreq = parseU32(idFreq.stringValue)
         (em4305 ? lfEMFound : lfT5Found).stringValue = "searching…"
         recCands = kLFKeyDict.flatMap { k in keyForms(k).map { (k + $0.0, $0.1) } }
@@ -438,7 +482,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
     func tryRecCandidate() {
         guard recIdx < recCands.count else {
-            log("✗ password not found in dictionary (\(recCands.count) tried); card unchanged")
+            log("✗ password not found in dictionary (\(recCands.count) tried).")
+            if !recEM {
+                log("  If the card no longer reads here (it may still read on X7/PC), run \u{201C}Unbrick T5577\u{201D} to rewrite block 0, then re-read.")
+            }
             (recEM ? lfEMFound : lfT5Found).stringValue = "not found"
             recPhase = .idle; return
         }
