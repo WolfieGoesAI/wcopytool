@@ -57,6 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let hidFC = NSTextField(string: "0")
     let hidCN = NSTextField(string: "0")
     let hidInfo = NSTextField(wrappingLabelWithString: "")
+    let hidProtect = NSButton(checkboxWithTitle: "Write-protect with password:", target: nil, action: nil)
+    let hidPwd = NSTextField(string: "00000000")
     let lfProtect = NSButton(checkboxWithTitle: "Password-protect written card with password:", target: nil, action: nil)
     let lfT5Found = NSTextField(string: "00000000")   // editable: found or user-entered password
     let lfEMFound = NSTextField(string: "00000000")
@@ -360,11 +362,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                           labeled("Card number:", field(hidCN, 100)),
                           ActionButton("Read HID") { [weak self] in self?.readHID() },
                           ActionButton("Write HID 26-bit") { [weak self] in self?.writeHID() }])
+        let protRow = hstack([hidProtect, field(hidPwd, 100)])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
-        let note = NSTextField(wrappingLabelWithString: "HID Prox 26-bit (H10301) on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Read returns the card's FC/CN. 27/34/35/37-bit, AWID, FDX-B and Paradox will follow once captured.")
+        let note = NSTextField(wrappingLabelWithString: "HID Prox 26-bit (H10301) on T5577: config 00107060 (FSK2a, RF/50), data in blocks 1–3. Unchecked = unprotected (config 00107060). Checked = write-protected: config 00107070 (PWD bit set) + the password in block 7. Read returns the card's FC/CN. 27/34/35/37-bit, AWID, FDX-B and Paradox follow once captured.")
         note.font = NSFont.systemFont(ofSize: 10); note.textColor = .tertiaryLabelColor; note.preferredMaxLayoutWidth = 900
         hidRefresh()
-        return vstack([head("HID Prox 26-bit (H10301)"), row, hidInfo, note])
+        return vstack([head("HID Prox 26-bit (H10301)"), row, protRow, hidInfo, note])
     }
     @objc func hidEdited() { hidRefresh() }
     func hidRefresh() {
@@ -380,16 +383,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let fc = parseU32(hidFC.stringValue), cn = parseU32(hidCN.stringValue)
         let freq = parseU32(idFreq.stringValue)
         let data = hidT5Blocks26(fc, cn)
-        let setPwd = targetPwd()
-        log(String(format: "HID 26-bit write FC=%u CN=%u → blocks %08X %08X %08X, config 00107060", fc, cn, data[0], data[1], data[2]))
+        let protect = hidProtect.state == .on
+        let setPwd = protect ? fieldKey(hidPwd.stringValue) : [0,0,0,0]
+        log(String(format: "HID 26-bit write FC=%u CN=%u → blocks %08X %08X %08X, config %@", fc, cn, data[0], data[1], data[2], protect ? "00107070 (locked)" : "00107060"))
         var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config")]
         // Authenticate with the current password (Unlock field, 0, or the known keys) and set block 7.
         var cands = writeAuthCands(lfT5Found)
         for k in kT5NormalizeKeys { let kb = keyBytes(k); if !cands.contains(where: { $0 == kb }) { cands.append(kb) } }
         for c in cands { seq.append((lfT5Write(addr: 7, word: setPwd, pwd: c, freq: freq), "block7 = pwd (auth \(hexJoin(c)))")) }
+        // HID config: PWD bit (0x10) set only when protecting → 00107070, else 00107060.
+        let cfg: [UInt8] = protect ? [0x00,0x10,0x70,0x70] : [0x00,0x10,0x70,0x60]
         let blocks: [(UInt8, [UInt8], String)] = [
             (1, u32be(data[0]), "HID blk1"), (2, u32be(data[1]), "HID blk2"),
-            (3, u32be(data[2]), "HID blk3"), (0, kT5HIDConfigWire, "HID config 00107060")]
+            (3, u32be(data[2]), "HID blk3"), (0, cfg, "HID config \(hexJoin(cfg))")]
         for (blk, d, name) in blocks {
             seq.append((lfT5WriteNoPwd(addr: blk, word: d, freq: freq), "\(name) op12"))
             seq.append((lfT5Write(addr: blk, word: d, pwd: setPwd, freq: freq), "\(name) op13"))
