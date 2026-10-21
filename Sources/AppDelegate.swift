@@ -261,6 +261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let dev = hstack([
             ActionButton("Device info (0x68)") { [weak self] in self?.sendPayload([0xFF,0x00,0x68], "device info") },
             ActionButton("Serial number (0x69)") { [weak self] in self?.sendPayload([0xFF,0x00,0x69], "serial") },
+            ActionButton("Init / Reset reader") { [weak self] in self?.resetReader() },
         ])
         // Confirmed LF read: FF 00 65 05 1E <freq> 00 00 00 00 → reply 02 0C 01 00 05 <5-byte EM id> CHK FD
         let readRow = hstack([labeled("Freq (Hz):", field(idFreq, 90)),
@@ -307,6 +308,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         return vstack([head("125 kHz ID"), dev, readRow, freqs, writeRow, pwdRow, foundRow, blkRow, exp, warn, note])
     }
     func setFreq(_ f: UInt32) { idFreq.stringValue = String(f) }
+
+    // Re-init the reader to a known LF state (clears a front-end mode left by EM4305/write ops).
+    // Replays the app's control/init commands + the RF-config (op 0x1F) used by the firmware.
+    func resetReader() {
+        let f = parseU32(idFreq.stringValue)
+        // RF config: FF 00 66 00 1E <freq> 1F 18 01 EF 00 9B 00 86 01  (params from the firmware)
+        let rfcfg: [UInt8] = [0xFF,0x00,0x66,0x00,0x1E] + u32le(f) + [0x1F, 0x18,0x01, 0xEF,0x00, 0x9B,0x00, 0x86,0x01]
+        log("Reset reader: init handshake + control + RF config…")
+        sendSeq([
+            ([0xFF,0x00,0x9A,0x5A,0xA5,0x54,0x69,0x61,0x6E], "init handshake"),
+            ([0xFF,0x00,0x68], "ctrl 0x68"),
+            ([0xFF,0x00,0x69], "ctrl 0x69"),
+            ([0xFF,0x00,0x6A,0x01], "toggle 0x6A"),
+            ([0xFF,0x00,0x6B,0x31], "slot 0x6B 31"),
+            ([0xFF,0x00,0x6B,0x30], "slot 0x6B 30"),
+            (rfcfg, "RF config 0x1F"),
+            (lfRead(freq: f), "read"),
+        ], gap: 0.3)
+    }
 
     // Send a timed sequence so the reader isn't overrun; replies arrive via the input callback.
     func sendSeq(_ items: [([UInt8], String)], gap: Double = 0.25) {
