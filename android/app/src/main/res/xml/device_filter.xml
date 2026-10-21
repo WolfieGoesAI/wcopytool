@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- wCopy copier VID/PID pairs (decimal) -->
+    <usb-device vendor-id="1046" product-id="45104" /> <!-- 0416:B030 -->
+    <usb-device vendor-id="1046" product-id="45105" /> <!-- 0416:B031 -->
+    <usb-device vendor-id="9496" product-id="24610" /> <!-- 2518:6022 -->
+    <usb-device vendor-id="9496" product-id="24600" /> <!-- 2518:6018 -->
+</resources>

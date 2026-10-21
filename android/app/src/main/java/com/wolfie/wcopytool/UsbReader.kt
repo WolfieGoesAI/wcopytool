@@ -1,0 +1,165 @@
+package com.wolfie.wcopytool
+
+import android.hardware.usb.*
+
+// USB-OTG transport + high-level LF operations. All calls are blocking and must run off the main
+// thread. Synchronous request/reply over the HID interrupt endpoints (or control SET_REPORT).
+class UsbReader(private val mgr: UsbManager) {
+    private var conn: UsbDeviceConnection? = null
+    private var intf: UsbInterface? = null
+    private var epIn: UsbEndpoint? = null
+    private var epOut: UsbEndpoint? = null
+    var device: UsbDevice? = null; private set
+    val connected get() = conn != null && epIn != null
+
+    fun findDevice(): UsbDevice? =
+        mgr.deviceList.values.firstOrNull { d -> Proto.KNOWN.any { it.first == d.vendorId && it.second == d.productId } }
+            ?: mgr.deviceList.values.firstOrNull { d -> (0 until d.interfaceCount).any { d.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_HID } }
+
+    fun open(dev: UsbDevice): String {
+        close()
+        val hid = (0 until dev.interfaceCount).map { dev.getInterface(it) }
+            .firstOrNull { it.interfaceClass == UsbConstants.USB_CLASS_HID } ?: return "No HID interface"
+        var inEp: UsbEndpoint? = null; var outEp: UsbEndpoint? = null
+        for (i in 0 until hid.endpointCount) {
+            val e = hid.getEndpoint(i)
+            if (e.direction == UsbConstants.USB_DIR_IN) inEp = e else outEp = e
+        }
+        if (inEp == null) return "No IN endpoint on HID interface"
+        val c = mgr.openDevice(dev) ?: return "openDevice failed (permission?)"
+        if (!c.claimInterface(hid, true)) { c.close(); return "claimInterface failed" }
+        conn = c; intf = hid; epIn = inEp; epOut = outEp; device = dev
+        return "Connected ${"%04X".format(dev.vendorId)}:${"%04X".format(dev.productId)} (${if (outEp != null) "interrupt OUT" else "control SET_REPORT"})"
+    }
+
+    fun close() {
+        try { intf?.let { conn?.releaseInterface(it) } } catch (_: Exception) {}
+        try { conn?.close() } catch (_: Exception) {}
+        conn = null; intf = null; epIn = null; epOut = null; device = null
+    }
+
+    private fun send(frame: ByteArray): Boolean {
+        val c = conn ?: return false
+        val out = epOut
+        return if (out != null) c.bulkTransfer(out, frame, frame.size, 1000) >= 0
+        else c.controlTransfer(0x21, 0x09, 0x0200, intf?.id ?: 0, frame, frame.size, 1000) >= 0
+    }
+    private fun recv(timeoutMs: Int = 600): ByteArray? {
+        val c = conn ?: return null; val inp = epIn ?: return null
+        val buf = ByteArray(Proto.REPORT_LEN)
+        val n = c.bulkTransfer(inp, buf, buf.size, timeoutMs)
+        return if (n > 0) buf.copyOf(n) else null
+    }
+    // One command → one reply.
+    private fun transact(payload: IntArray, timeoutMs: Int = 600): Proto.Parsed? {
+        if (!send(Proto.build(payload))) return null
+        val r = recv(timeoutMs) ?: return null
+        return Proto.parse(r)
+    }
+    private fun sendSeq(items: List<IntArray>, log: (String) -> Unit) {
+        for (p in items) { transact(p, 400); Thread.sleep(20) }
+    }
+
+    // ---- key-variant expansion ----
+    private fun eq(a: IntArray, b: IntArray) = a.contentEquals(b)
+    fun expandKeys(keys: List<IntArray>, bitRev: Boolean, byteRev: Boolean): List<IntArray> {
+        val out = ArrayList<IntArray>()
+        fun add(k: IntArray) { if (out.none { eq(it, k) }) out.add(k) }
+        for (k in keys) { add(k); if (bitRev) add(Proto.bitrev4(k)); if (byteRev) add(Proto.rev4(k)) }
+        return out
+    }
+
+    // ---- read ----
+    fun readEMId(freq: Long): Long? {
+        transact(Proto.lfRFConfig(freq))
+        for (i in 0 until 8) { Proto.recEMid(transact(Proto.lfRead(freq)))?.let { return it }; Thread.sleep(40) }
+        return null
+    }
+    fun readHID(freq: Long): Proto.HidRead? {
+        transact(Proto.lfRFConfig(freq))
+        for (i in 0 until 8) { val r = Proto.hidDecode(transact(Proto.hidReadCmd())); if (r?.fmt != null) return r; Thread.sleep(40) }
+        return null
+    }
+
+    // ---- unified T5577 write (data blocks + config block 0, with password handling) ----
+    fun writeCard(dataBlocks: LongArray, baseConfig: Long, protect: Boolean, pwd: String, cur: String, freq: Long, log: (String) -> Unit) {
+        val zero = intArrayOf(0, 0, 0, 0)
+        val setPwd = if (protect) Proto.fieldKey(pwd) else zero
+        val curK = Proto.fieldKey(cur)
+        val cfg = Proto.u32be(baseConfig or (if (protect) 0x10L else 0L))
+        val b7 = ArrayList<IntArray>(); fun addB(k: IntArray) { if (b7.none { eq(it, k) }) b7.add(k) }
+        addB(curK); addB(zero); Proto.NORMALIZE.forEach { addB(Proto.keyBytes(it)) }
+        val d = ArrayList<IntArray>(); fun addD(k: IntArray) { if (d.none { eq(it, k) }) d.add(k) }
+        addD(setPwd); addD(curK); addD(zero)
+        log("write ${dataBlocks.size} blocks, config ${Proto.hexJoin(cfg)}")
+        val seq = ArrayList<IntArray>()
+        seq.add(Proto.lfRFConfig(freq))
+        for (c in b7) seq.add(Proto.lfT5Write(7, setPwd, c, freq))
+        val blocks = ArrayList<Pair<Int, IntArray>>()
+        dataBlocks.forEachIndexed { i, w -> blocks.add((i + 1) to Proto.u32be(w)) }
+        blocks.add(0 to cfg)
+        for ((blk, data) in blocks) { seq.add(Proto.lfT5WriteNoPwd(blk, data, freq)); for (pw in d) seq.add(Proto.lfT5Write(blk, data, pw, freq)) }
+        seq.add(Proto.lfModeCmd(0x64, freq))
+        sendSeq(seq, log)
+        log("done")
+    }
+
+    // ---- identifying T5577 unlock: find the key, restore id, clear protection ----
+    fun unlockT5577(keys: List<IntArray>, freq: Long, log: (String) -> Unit): String {
+        val orig = readEMId(freq) ?: run { log("no card"); return "no card" }
+        val marker = orig xor 1
+        val (mw1, mw2) = Proto.em4100Words(marker)
+        // precheck: already unprotected?
+        transact(Proto.lfRFConfig(freq))
+        transact(Proto.lfT5Write(1, Proto.u32be(mw1), intArrayOf(0,0,0,0), freq))
+        transact(Proto.lfT5Write(2, Proto.u32be(mw2), intArrayOf(0,0,0,0), freq))
+        Thread.sleep(120)
+        if (readEMId(freq) == marker) { restoreT5(orig, freq); log("card has no password (not protected)"); return "no password" }
+        for ((i, k) in keys.withIndex()) {
+            transact(Proto.lfT5Write(7, intArrayOf(0,0,0,0), k, freq))
+            transact(Proto.lfT5Write(1, Proto.u32be(mw1), intArrayOf(0,0,0,0), freq))
+            transact(Proto.lfT5Write(2, Proto.u32be(mw2), intArrayOf(0,0,0,0), freq))
+            Thread.sleep(120)
+            if (readEMId(freq) == marker) { restoreT5(orig, freq); val ks = Proto.hexJoin(k); log("password is $ks"); return ks }
+            if (i % 8 == 7) log("…tried ${i + 1}/${keys.size}")
+        }
+        log("not found in ${keys.size} keys"); return "not found"
+    }
+    private fun restoreT5(id: Long, freq: Long) {
+        val (w1, w2) = Proto.em4100Words(id)
+        sendSeq(listOf(
+            Proto.lfT5WriteNoPwd(1, Proto.u32be(w1), freq),
+            Proto.lfT5WriteNoPwd(2, Proto.u32be(w2), freq),
+            Proto.lfT5WriteNoPwd(0, Proto.u32be(0x00148040L), freq),
+            Proto.lfModeCmd(0x05, freq)
+        )) {}
+    }
+
+    // ---- HID unlock → convert to plain EM4100, identifying the password ----
+    fun unlockHID(keys: List<IntArray>, emId: Long, freq: Long, log: (String) -> Unit): String {
+        transact(Proto.lfRFConfig(freq))
+        readEMId(freq)?.let { log("already plain EM id %010X".format(it)); return "not locked" }
+        val marker = if (emId == 0L) 1L else emId xor 1
+        val (mw1, mw2) = Proto.em4100Words(marker)
+        val open = Proto.u32be(0x00148040L)
+        for ((i, k) in keys.withIndex()) {
+            val seq = listOf(
+                Proto.lfT5Write(7, intArrayOf(0,0,0,0), k, freq),
+                Proto.lfT5WriteNoPwd(1, Proto.u32be(mw1), freq), Proto.lfT5Write(1, Proto.u32be(mw1), intArrayOf(0,0,0,0), freq),
+                Proto.lfT5WriteNoPwd(2, Proto.u32be(mw2), freq), Proto.lfT5Write(2, Proto.u32be(mw2), intArrayOf(0,0,0,0), freq),
+                Proto.lfT5WriteNoPwd(0, open, freq), Proto.lfT5Write(0, open, intArrayOf(0,0,0,0), freq),
+                Proto.lfModeCmd(0x05, freq)
+            )
+            sendSeq(seq) {}
+            Thread.sleep(120)
+            if (readEMId(freq) == marker) {
+                val real = if (emId == 0L) 1L else emId
+                restoreT5(real, freq)
+                val ks = Proto.hexJoin(k)
+                log("password was $ks; converted to plain EM4100 id %010X".format(real)); return ks
+            }
+            if (i % 8 == 7) log("…tried ${i + 1}/${keys.size}")
+        }
+        log("no known key cleared it"); return "not found"
+    }
+}
