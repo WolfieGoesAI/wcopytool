@@ -193,15 +193,14 @@ func em4100Words(_ id40: UInt64) -> (UInt32, UInt32) {
     return (pack(0..<32), pack(32..<64))
 }
 
-// Proxmark3 T55xx default-password dictionary (wire-order hex) + this reader's own keys.
-// Used by the Unlock buttons to try opening password-protected cards.
+// Proxmark3 T55xx default-password dictionary (wire-order hex) + this reader's own keys,
+// curated: bit-inverse duplicates removed (the normal/reverse routine covers the mirror forms).
 let kLFKeyDict: [String] = [
     "00000000","51243648","000D8787","19920427","002BCFCF","50524F58","F9DCEBA0","65857569",
-    "05D73B9F","89A69E60","314159E0","7B3D5C48","AA55BBBB","A5B4C3D2","1C0B5848","00434343",
-    "50415353","444E4752","4E457854","44B44CAE","88661858","E9920427","575F4F4B","50520901",
-    "20206666","5469616E","7686962A","C0F5009A","07CEE75D","FEEDBEEF","DEADC0DE","A9EF2AFC",
-    "11111111","22222222","33333333","44444444","55555555","66666666","77777777","88888888",
-    "99999999","AAAAAAAA","BBBBBBBB","CCCCCCCC","DDDDDDDD","EEEEEEEE","FFFFFFFF","A0A1A2A3",
+    "89A69E60","314159E0","7B3D5C48","AA55BBBB","A5B4C3D2","1C0B5848","00434343","50415353",
+    "444E4752","4E457854","44B44CAE","88661858","E9920427","575F4F4B","50520901","20206666",
+    "5469616E","C0F5009A","07CEE75D","FEEDBEEF","DEADC0DE","A9EF2AFC","11111111","22222222",
+    "33333333","55555555","66666666","77777777","99999999","BBBBBBBB","FFFFFFFF","A0A1A2A3",
     "B0B1B2B3","01234567","12345678","0CB7E7FC","FABADA11","AABBCCDD","0C0D0E0F","01020304",
 ]
 
@@ -221,12 +220,12 @@ func bitrev4(_ b: [UInt8]) -> [UInt8] {
     for _ in 0..<32 { r = (r<<1)|(v&1); v >>= 1 }
     return [UInt8((r>>24)&0xFF),UInt8((r>>16)&0xFF),UInt8((r>>8)&0xFF),UInt8(r&0xFF)]
 }
-/// Distinct candidate forms of a key for an unlock sweep: as-is, byte-reversed, bit-mirrored.
+/// Candidate forms of a key for a sweep: as-is and byte-reversed (normal/reverse routine).
 func keyForms(_ hex: String) -> [(String,[UInt8])] {
     let b = keyBytes(hex)
     var out: [(String,[UInt8])] = []
     func add(_ tag: String, _ v: [UInt8]) { if !out.contains(where: {$0.1 == v}) { out.append((tag, v)) } }
-    add("", b); add("~rev", rev4(b)); add("~bitmirror", bitrev4(b))
+    add("", b); add("~rev", rev4(b))
     return out
 }
 

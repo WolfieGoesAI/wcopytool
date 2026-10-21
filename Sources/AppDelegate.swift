@@ -21,6 +21,8 @@ final class ActionButton: NSButton {
     @objc private func fire() { onClick?() }
 }
 
+enum RecPhase { case idle, readOrig, verify }
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     let hid = HIDTransport()
@@ -289,8 +291,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                                labeled("Config:", field(lfConfig, 90)),
                                ActionButton("Write EM4100") { [weak self] in self?.writeEM() }])
         let pwdRow = hstack([labeled("Password:", field(lfPwd, 100)), pwdReverse,
-                             ActionButton("Unlock T5577") { [weak self] in self?.unlock(false) },
-                             ActionButton("Unlock EM4305") { [weak self] in self?.unlock(true) }])
+                             ActionButton("Find T5577 pwd") { [weak self] in self?.findPwd(false) },
+                             ActionButton("Find EM4305 pwd") { [weak self] in self?.findPwd(true) }])
         let blkRow = hstack([labeled("Addr:", field(lfBlk, 40)),
                              labeled("Word (hex):", field(lfWord, 100)),
                              ActionButton("Write word") { [weak self] in self?.writeBlockManual() }])
@@ -346,24 +348,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         }
     }
 
-    // Unlock sweeps: try every dictionary key (in all byte/bit forms) and read back; the key that
-    // leaves a valid EM read is the card's password.
-    func unlock(_ em4305: Bool) {
-        let freq = parseU32(idFreq.stringValue)
-        var seq: [([UInt8], String)] = []
-        for key in kLFKeyDict {
-            for (tag, kb) in keyForms(key) {
-                let label = "try \(key)\(tag)"
-                if em4305 {
-                    seq.append((em4305LoginBytes(pwd: kb, freq: freq), "EM4305 login \(label)"))
-                    seq.append((lfRead(freq: freq), "  read after \(label)"))
-                } else {
-                    seq.append((lfReadPwd(pwd: kb, freq: freq), "T5577 pwd-read \(label)"))
-                }
-            }
+    // ---- Write-test password recovery (state machine) ----
+    // For each candidate key: write a marker id with that key, read back. The key that makes the
+    // read change to the marker is the card's password; the original id is then restored.
+    var recPhase: RecPhase = .idle
+    var recEM = false
+    var recCands: [(String,[UInt8])] = []
+    var recIdx = 0
+    var recOrig: UInt64 = 0
+    var recMarker: UInt64 = 0
+    var recFreq: UInt32 = 125000
+
+    func findPwd(_ em4305: Bool) {
+        guard recPhase == .idle else { log("recovery already running"); return }
+        recEM = em4305; recFreq = parseU32(idFreq.stringValue)
+        recCands = kLFKeyDict.flatMap { k in keyForms(k).map { (k + $0.0, $0.1) } }
+        recIdx = 0; recPhase = .readOrig
+        log("Find \(em4305 ? "EM4305" : "T5577") password: reading current id…")
+        sendPayload(lfRead(freq: recFreq), "read current id")
+    }
+    func recEMid(_ bytes: [UInt8]) -> UInt64? {
+        guard let (p, _, _, _) = Frame.parse(bytes), p.count == 6, p[0] == 0x05 else { return nil }
+        return p[1...5].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+    }
+    func recWriteSeq(id: UInt64, key: [UInt8], label: String) -> [([UInt8],String)] {
+        let (w1, w2) = em4100Words(id)
+        var seq: [([UInt8],String)] = []
+        if recEM {
+            seq.append((em4305LoginBytes(pwd: key, freq: recFreq), "login \(label)"))
+            seq.append((em4305WriteWord(addr: 5, bytes: u32be(w1), freq: recFreq), "w5"))
+            seq.append((em4305WriteWord(addr: 6, bytes: u32be(w2), freq: recFreq), "w6"))
+        } else {
+            seq.append((lfT5Write(addr: 1, word: u32be(w1), pwd: key, freq: recFreq), "blk1 \(label)"))
+            seq.append((lfT5Write(addr: 2, word: u32be(w2), pwd: key, freq: recFreq), "blk2"))
         }
-        log("unlock \(em4305 ? "EM4305" : "T5577"): trying \(seq.count) steps — watch for a valid EM read")
-        sendSeq(seq, gap: 0.12)
+        seq.append((lfRead(freq: recFreq), "verify"))
+        return seq
+    }
+    func tryRecCandidate() {
+        guard recIdx < recCands.count else {
+            log("✗ password not found in dictionary (\(recCands.count) tried); card unchanged")
+            recPhase = .idle; return
+        }
+        let (label, key) = recCands[recIdx]
+        sendSeq(recWriteSeq(id: recMarker, key: key, label: label), gap: 0.12)
+    }
+    func handleRecovery(_ bytes: [UInt8]) {
+        guard let id = recEMid(bytes) else { return }   // ignore write-status (02 07) replies
+        switch recPhase {
+        case .readOrig:
+            recOrig = id
+            recMarker = (id ^ 0x01) == id ? (id ^ 0x100) : (id ^ 0x01)
+            recIdx = 0; recPhase = .verify
+            log(String(format: "current id=%010llX marker=%010llX — sweeping %d candidates", recOrig, recMarker, recCands.count))
+            tryRecCandidate()
+        case .verify:
+            if id == recMarker {
+                let (label, key) = recCands[recIdx]
+                recPhase = .idle
+                log("✓ PASSWORD FOUND: \(label)  (wire \(hex(key))) — restoring original id")
+                sendSeq(recWriteSeq(id: recOrig, key: key, label: "restore"), gap: 0.12)
+            } else {
+                recIdx += 1
+                tryRecCandidate()
+            }
+        case .idle:
+            break
+        }
     }
     func writeBlockManual() {
         let addr = parseByte(lfBlk.stringValue)
@@ -484,6 +535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fUID.stringValue = p.uid.isEmpty ? "—" : p.uid
         fPayload.stringValue = p.payloadHex.isEmpty ? "—" : p.payloadHex
         fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
+        if recPhase != .idle { handleRecovery(bytes) }
     }
 
     func log(_ s: String) {
