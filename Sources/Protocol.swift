@@ -383,6 +383,7 @@ func hidValue(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> UInt64 {
     switch fmt {
     case .h10301: return 0x2000000000 | (UInt64(1) << 26) | UInt64(hidWiegand26(fc, cn))
     case .h10304: return hidWiegand37(fc, cn)
+    case .awid26: return 0            // AWID doesn't use the HID "value" path (see awid26Blocks)
     }
 }
 
