@@ -152,13 +152,16 @@ class UsbReader(private val mgr: UsbManager) {
         val marker = orig xor 1
         val (mw1, mw2) = Proto.em4100Words(marker)
         val z = intArrayOf(0, 0, 0, 0)
-        // Precheck "truly unprotected" with a NO-PASSWORD (op12) marker write — this succeeds only when
-        // the PWD bit is actually clear, so it isn't fooled by a protected-with-password-0 state.
+        // Precheck "already unprotected": write the marker authenticating with password 0 (op13). On
+        // this device op13 is what commits a write, and it is accepted only when the card is open (or its
+        // password is 0) — so a readback of the marker means unprotected. (A no-pwd op12 write alone does
+        // not reliably commit on this device, so it can't be used here.)
         transact(Proto.lfRFConfig(freq))
-        transact(Proto.lfT5WriteNoPwd(1, Proto.u32be(mw1), freq))
-        transact(Proto.lfT5WriteNoPwd(2, Proto.u32be(mw2), freq))
+        transact(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
+        transact(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
         Thread.sleep(150)
-        if (readEMId(freq) == marker) { restoreT5(orig, freq); log("card has no password (not protected)"); return "no password" }
+        if (readEMId(freq) == marker) { log("precheck: card is unprotected"); restoreT5(orig, z, freq, log); log("card has no password (not protected)"); return "no password" }
+        log("precheck: protected — sweeping ${keys.size} key(s)")
         for ((i, k) in keys.withIndex()) {
             // Clear block 7 with the candidate, then write the marker with password 0 — only the real
             // password lets block 7 clear, so only then does the pwd-0 marker write take.
@@ -166,27 +169,16 @@ class UsbReader(private val mgr: UsbManager) {
             transact(Proto.lfT5Write(1, Proto.u32be(mw1), z, freq))
             transact(Proto.lfT5Write(2, Proto.u32be(mw2), z, freq))
             Thread.sleep(150)
-            if (readEMId(freq) == marker) { restoreT5(orig, freq); val ks = Proto.hexJoin(k); log("password is $ks"); return ks }
+            if (readEMId(freq) == marker) { val ks = Proto.hexJoin(k); log("password is $ks — clearing protection"); restoreT5(orig, k, freq, log); return ks }
             if (i % 8 == 7) log("…tried ${i + 1}/${keys.size}")
         }
         log("not found in ${keys.size} keys"); return "not found"
     }
-    private fun restoreT5(id: Long, freq: Long) {
-        // Leave the card TRULY unprotected. At this point block 7 is 0 but the PWD bit in block 0 is
-        // still set, so a no-pwd (op12) write is rejected — we must authenticate with password 0 (op13)
-        // to clear the PWD bit, then op12 to reassert now that it's open. Belt-and-suspenders so a
-        // re-unlock correctly sees "no password".
+    // Clear the password and rewrite the id UNPROTECTED by reusing the proven writeCard path,
+    // authenticating with the found key (foundKey = 0 when the card was already open).
+    private fun restoreT5(id: Long, foundKey: IntArray, freq: Long, log: (String) -> Unit) {
         val (w1, w2) = Proto.em4100Words(id)
-        val z = intArrayOf(0, 0, 0, 0)
-        val open = Proto.u32be(0x00148040L)
-        sendSeq(listOf(
-            Proto.lfT5Write(7, z, z, freq),                  // ensure password block = 0
-            Proto.lfT5Write(0, open, z, freq),               // clear PWD bit (op13 pwd 0)
-            Proto.lfT5WriteNoPwd(0, open, freq),             // reassert config (op12, now open)
-            Proto.lfT5Write(1, Proto.u32be(w1), z, freq),  Proto.lfT5WriteNoPwd(1, Proto.u32be(w1), freq),
-            Proto.lfT5Write(2, Proto.u32be(w2), z, freq),  Proto.lfT5WriteNoPwd(2, Proto.u32be(w2), freq),
-            Proto.lfModeCmd(0x05, freq)
-        )) {}
+        writeCard(longArrayOf(w1, w2), 0x00148040L, false, "00000000", Proto.hexJoin(foundKey), freq, log)
     }
 
     // ---- HID unlock → convert to plain EM4100, identifying the password ----
@@ -208,7 +200,7 @@ class UsbReader(private val mgr: UsbManager) {
             Thread.sleep(120)
             if (readEMId(freq) == marker) {
                 val real = if (emId == 0L) 1L else emId
-                restoreT5(real, freq)
+                restoreT5(real, intArrayOf(0, 0, 0, 0), freq, log)
                 val ks = Proto.hexJoin(k)
                 log("password was $ks; converted to plain EM4100 id %010X".format(real)); return ks
             }
