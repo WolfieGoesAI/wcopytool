@@ -89,14 +89,20 @@ class UsbReader(private val mgr: UsbManager) {
     // The Mac app brackets writes with mode 0x14; sending it before a write burst keeps the card in the
     // write/program state so the following block writes commit reliably.
     private fun writeMode(freq: Long) { transact(Proto.lfModeCmd(0x14, freq)); wset() }
-    fun readHID(freq: Long): Proto.HidRead? {
+    fun readHID(freq: Long, log: (String) -> Unit = {}): Proto.HidRead? {
         transact(Proto.lfRFConfig(freq))
         var any: Proto.HidRead? = null
+        var lastHex: String? = null
         for (i in 0 until 10) {
-            val r = Proto.hidDecode(transact(Proto.hidReadCmd()))
-            if (r != null) { if (r.fmt != null) return r; any = r }   // keep a card-present-but-unknown result to report
+            val parsed = transact(Proto.hidReadCmd())
+            if (parsed != null && parsed.payload.any { it != 0 }) {
+                lastHex = parsed.payload.joinToString(" ") { "%02X".format(it) }   // full raw reply, for AWID/Paradox diagnosis
+                val r = Proto.hidDecode(parsed)
+                if (r != null) { if (r.fmt != null) return r; any = r }
+            }
             Thread.sleep(40)
         }
+        if (any == null && lastHex != null) log("read reply (undecoded): $lastHex")
         return any
     }
 

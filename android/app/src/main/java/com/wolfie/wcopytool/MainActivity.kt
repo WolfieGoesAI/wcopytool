@@ -210,7 +210,7 @@ class MainActivity : ComponentActivity() {
             if (isFdx) CheckRow("FDX-B animal flag", animal)
             Row {
                 Btn("Read HID") { go {
-                    val r = reader.readHID(Fmt.parseDec0(freq.value))
+                    val r = reader.readHID(Fmt.parseDec0(freq.value), ::log)
                     if (r == null) { log("✗ no HID card") }
                     else {
                         log("raw=%010X  len=%d".format(r.raw, r.len))   // ground-truth bits, in case a field is off

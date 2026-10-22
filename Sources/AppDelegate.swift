@@ -483,6 +483,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             }
         } else if hidReadRetries < 8 {
             hidReadRetries += 1
+            // Surface any non-empty reply that didn't decode (e.g. AWID/Paradox) so the raw bits are visible.
+            if p.contains(where: { $0 != 0 }) {
+                log("read reply (undecoded): " + p.map { String(format: "%02X", $0) }.joined(separator: " "))
+            }
             afterDelay(0.2) { [weak self] in self?.sendPayload(hidReadCmd(), "read HID") }
         } else {
             hidReadActive = false
