@@ -375,7 +375,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                           labeled("Card number:", field(hidCN, 100)),
                           ActionButton("Read HID") { [weak self] in self?.readHID() },
                           ActionButton("Write HID") { [weak self] in self?.writeHID() },
-                          ActionButton("Unlock HID") { [weak self] in self?.startHIDUnlock() }])
+                          ActionButton("Unlock HID") { [weak self] in self?.startHIDUnlock() },
+                          ActionButton("Probe raw") { [weak self] in self?.probeRawRead() }])
         hidAnimal.state = .on
         hidAnimal.target = self; hidAnimal.action = #selector(hidEdited)
         let protRow = hstack([hidProtect, field(hidPwd, 100),
@@ -462,6 +463,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
     var hidReadActive = false
     var hidReadRetries = 0
+    // Experiment: ask the 0x6A reader for more than the usual 8 bytes. If the firmware honours a larger
+    // length it returns more of the raw FSK stream (AWID/Paradox need the full 96 bits). The RX lines are
+    // already logged, so we just fire reads at several lengths and read the replies off the log.
+    func probeRawRead() {
+        let f = parseU32(idFreq.stringValue)
+        sendPayload(lfRFConfig(freq: f), "RF config")
+        let lens: [UInt8] = [0x08, 0x10, 0x20, 0x40, 0x60, 0xC0]
+        for (i, n) in lens.enumerated() {
+            afterDelay(0.35 * Double(i + 1)) { [weak self] in self?.sendPayload([0xFF, 0x00, 0x6A, 0x01, 0x00, n], String(format: "probe raw len=0x%02X", n)) }
+        }
+    }
     func readHID() {
         guard recPhase == .idle, !ulActive, !hidReadActive, !hidUlActive else { log("busy — another operation is running"); return }
         hidReadActive = true; hidReadRetries = 0

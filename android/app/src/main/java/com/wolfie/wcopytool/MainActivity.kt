@@ -233,6 +233,8 @@ class MainActivity : ComponentActivity() {
                     val keys = reader.expandKeys(unlockKeys(keyText.value, cur.value, pwd.value, false), bitRev.value, byteRev.value)
                     applyFound(cur, reader.unlockHID(keys, 1L, Fmt.parseDec0(freq.value), ::log) { setProgress(it) })
                 } }
+                Spacer(Modifier.width(8.dp))
+                Btn("Probe raw") { go { reader.probeRawRead(Fmt.parseDec0(freq.value), ::log) } }
             }
             RevRow("Unlock also try:", bitRev, byteRev)
         }
