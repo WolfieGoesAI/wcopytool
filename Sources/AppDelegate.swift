@@ -367,7 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func pageHID() -> NSView {
         hidFC.target = self; hidFC.action = #selector(hidEdited)
         hidCN.target = self; hidCN.action = #selector(hidEdited)
-        hidFmtPop.addItems(withTitles: ["HID 26-bit (H10301)", "HID 37-bit (H10304)", "AWID 26-bit", "Paradox", "FDX-B"])
+        hidFmtPop.addItems(withTitles: ["HID 26-bit (H10301)", "HID 33-bit (D10202)", "HID 34-bit (H10306)", "HID 35-bit (Corp 1000)", "HID 37-bit (H10302, no FC)", "HID 37-bit (H10304)", "AWID 26-bit", "Paradox", "FDX-B"])
         hidFmtPop.selectItem(at: 0)
         hidFmtPop.target = self; hidFmtPop.action = #selector(hidEdited)
         let row = hstack([labeled("Format:", hidFmtPop),
@@ -392,11 +392,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func lfBlocksFor(_ fmt: HIDFormat) -> [UInt32] {
         let fc = parseU32(hidFC.stringValue)
         if fmt == .fdxb { return fdxbBlocks(country: fc, national: parseU40(hidCN.stringValue), animal: hidAnimal.state == .on) }
+        if fmt == .h10302 { return hidT5BlocksV(hidH10302(parseU40(hidCN.stringValue) & 0x7FFFFFFFF)) }  // 35-bit CN
         return lfProxBlocks(fmt, fc, parseU32(hidCN.stringValue))
     }
     func hidFmtName(_ fmt: HIDFormat) -> String {
         switch fmt {
         case .h10301: return "HID 26-bit (H10301)"
+        case .d10202: return "HID 33-bit (D10202)"
+        case .h10306: return "HID 34-bit (H10306)"
+        case .c1k35:  return "HID 35-bit (Corp 1000)"
+        case .h10302: return "HID 37-bit (H10302, no FC)"
         case .h10304: return "HID 37-bit (H10304)"
         case .awid26: return "AWID 26-bit"
         case .paradox: return "Paradox"
@@ -407,9 +412,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let fmt = hidFormat()
         let b = lfBlocksFor(fmt)
         let cfg = lfProxConfig(fmt)
-        let ids = fmt == .fdxb
-            ? String(format: "Country %u, National %llu", parseU32(hidFC.stringValue), parseU40(hidCN.stringValue))
-            : String(format: "FC %u, CN %u", parseU32(hidFC.stringValue), parseU32(hidCN.stringValue))
+        let ids: String
+        if fmt == .fdxb {
+            ids = String(format: "Country %u, National %llu", parseU32(hidFC.stringValue), parseU40(hidCN.stringValue))
+        } else if fmt == .h10302 {
+            ids = String(format: "CN %llu", parseU40(hidCN.stringValue) & 0x7FFFFFFFF)   // 35-bit, no FC
+        } else {
+            ids = String(format: "FC %u, CN %u", parseU32(hidFC.stringValue), parseU32(hidCN.stringValue))
+        }
         let blkStr = b.enumerated().map { String(format: "blk%d %08X", $0.offset + 1, $0.element) }.joined(separator: "  ")
         hidInfo.stringValue = String(format: "%@   (%@)\nT55x7 cfg  : %08X   %@", hidFmtName(fmt), ids, cfg, blkStr)
     }

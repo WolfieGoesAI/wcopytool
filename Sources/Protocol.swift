@@ -311,7 +311,7 @@ let kT5HIDConfigWire: [UInt8] = [0x00,0x10,0x70,0x60]
 
 // LF prox formats this app can write. HID 26/37 are capture-verified; AWID 26 is spec-based
 // (Proxmark getAWIDBits) and WRITE-ONLY (this reader can't read AWID back) — verify on another reader.
-enum HIDFormat: Int { case h10301 = 0, h10304 = 1, awid26 = 2, paradox = 3, fdxb = 4 }
+enum HIDFormat: Int { case h10301 = 0, d10202 = 1, h10306 = 2, c1k35 = 3, h10302 = 4, h10304 = 5, awid26 = 6, paradox = 7, fdxb = 8 }
 
 // Base T5577 config (block 0) per format. The PWD bit (0x10) is OR'd in by the caller when protecting.
 func lfProxConfig(_ fmt: HIDFormat) -> UInt32 {
@@ -461,14 +461,51 @@ func hidWiegand37(_ fc: UInt32, _ cn: UInt32) -> UInt64 {
     return (ep << 36) | frame | op
 }
 
+// ---- additional HID formats, 26..37 bit (bit layouts/parity ported from Proxmark wiegand_formats.c) ----
+// Proxmark numbers positions 0..len-1 from the MSB (pos 0 = leading bit); we hold the len-bit field in a
+// UInt64 where Proxmark position `pos` is bit (len-1-pos). raw() adds the start sentinel + 0x20 header the
+// same way add_HID_header does (nothing added for 37-bit cards).
+private func evp(_ x: UInt64) -> UInt64 { UInt64(x.nonzeroBitCount % 2) }           // even-parity bit
+private func odp(_ x: UInt64) -> UInt64 { UInt64((x.nonzeroBitCount + 1) % 2) }      // odd-parity bit
+private struct Wp {
+    let len: Int; var p: UInt64 = 0
+    init(_ l: Int) { len = l }
+    mutating func set(_ v: UInt64, _ firstBit: Int, _ width: Int) { p |= (v & ((UInt64(1) << width) - 1)) << (len - firstBit - width) }
+    func get(_ firstBit: Int, _ width: Int) -> UInt64 { (p >> (len - firstBit - width)) & ((UInt64(1) << width) - 1) }
+    mutating func bit(_ b: UInt64, _ pos: Int) { p |= (b & 1) << (len - 1 - pos) }
+    func raw() -> UInt64 { len == 37 ? p : (UInt64(1) << 37) | (UInt64(1) << len) | p }
+}
+// D10202 33-bit: FC 7, CN 24.
+func hidD10202(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(33); w.set(UInt64(fc), 1, 7); w.set(UInt64(cn), 8, 24); w.bit(evp(w.get(1, 16)), 0); w.bit(odp(w.get(16, 16)), 32); return w.raw() }
+// H10306 34-bit: FC 16, CN 16.
+func hidH10306(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(34); w.set(UInt64(fc), 1, 16); w.set(UInt64(cn), 17, 16); w.bit(evp(w.get(1, 16)), 0); w.bit(odp(w.get(17, 16)), 33); return w.raw() }
+// H10302 37-bit: no facility code, 35-bit card number.
+func hidH10302(_ cn: UInt64) -> UInt64 { var w = Wp(37); w.set(cn, 1, 35); w.bit(evp(w.get(1, 18)), 0); w.bit(odp(w.get(18, 18)), 36); return w.raw() }
+// Corporate 1000 35-bit (std): FC 12, CN 20, 3 interleaved parity bits (ported verbatim from Proxmark).
+func hidC1k35(_ fc: UInt32, _ cn: UInt32) -> UInt64 {
+    var bot: UInt64 = 0, mid: UInt64 = 0
+    bot |= (UInt64(cn) & 0xFFFFF) << 1
+    bot |= (UInt64(fc) & 0x7FF) << 21
+    mid |= (UInt64(fc) & 0x800) >> 11
+    mid |= evp((mid & 0x1) ^ (bot & 0xB6DB6DB6)) << 1
+    bot |= odp((mid & 0x3) ^ (bot & 0x6DB6DB6C))
+    mid |= odp((mid & 0x3) ^ (bot & 0xFFFFFFFF)) << 2
+    let p = (mid << 32) | (bot & 0xFFFFFFFF)
+    return (UInt64(1) << 37) | (UInt64(1) << 35) | p
+}
+
 // Build the device "value" V (the 44-bit logical payload, right-aligned) for a format + FC/CN.
 // 26-bit: a 0x20 lead marker (bit 37) + sentinel (bit 26) + 26-bit Wiegand.
 // 37-bit: the 37-bit Wiegand frame itself (leading parity sits at bit 36).
+// (H10302's card number exceeds 32 bits, so it is built directly in lfBlocksFor, not through here.)
 func hidValue(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> UInt64 {
     switch fmt {
     case .h10301: return 0x2000000000 | (UInt64(1) << 26) | UInt64(hidWiegand26(fc, cn))
     case .h10304: return hidWiegand37(fc, cn)
-    case .awid26, .paradox, .fdxb: return 0  // these use their own block builders, not the HID "value" path
+    case .d10202: return hidD10202(fc, cn)
+    case .h10306: return hidH10306(fc, cn)
+    case .c1k35:  return hidC1k35(fc, cn)
+    case .h10302, .awid26, .paradox, .fdxb: return 0  // built by their own block builders, not this path
     }
 }
 
