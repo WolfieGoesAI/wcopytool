@@ -136,9 +136,45 @@ object Proto {
         val op = (java.lang.Long.bitCount(bot18).toLong() + 1) % 2
         return (ep shl 36) or frame or op
     }
+    // ---- generic Wiegand packer, positions per Proxmark wiegand_formats.c ----
+    // Proxmark numbers bit positions 0..len-1 from the MSB (pos 0 = leading bit). We hold the len-bit
+    // field in a Long where Proxmark position `pos` is Long bit (len-1-pos), so field/parity math maps
+    // straight across. The HID start sentinel + 0x20 header are added the same way add_HID_header does
+    // (nothing is added for 37-bit cards).
+    private fun ev(x: Long) = java.lang.Long.bitCount(x).toLong() and 1L           // even-parity bit
+    private fun od(x: Long) = (java.lang.Long.bitCount(x).toLong() and 1L) xor 1L  // odd-parity bit
+    private class Wp(val len: Int) {
+        var p = 0L
+        fun set(value: Long, firstBit: Int, width: Int) { p = p or ((value and ((1L shl width) - 1)) shl (len - firstBit - width)) }
+        fun get(firstBit: Int, width: Int) = (p shr (len - firstBit - width)) and ((1L shl width) - 1)
+        fun bit(b: Long, pos: Int) { p = p or ((b and 1L) shl (len - 1 - pos)) }
+        fun raw() = if (len == 37) p else (1L shl 37) or (1L shl len) or p
+    }
+    // HID D10202 33-bit: FC 7, CN 24.
+    fun hidD10202(fc: Long, cn: Long): Long { val w = Wp(33); w.set(fc, 1, 7); w.set(cn, 8, 24); w.bit(ev(w.get(1, 16)), 0); w.bit(od(w.get(16, 16)), 32); return w.raw() }
+    // HID H10306 34-bit: FC 16, CN 16.
+    fun hidH10306(fc: Long, cn: Long): Long { val w = Wp(34); w.set(fc, 1, 16); w.set(cn, 17, 16); w.bit(ev(w.get(1, 16)), 0); w.bit(od(w.get(17, 16)), 33); return w.raw() }
+    // HID H10302 37-bit: no facility code, 35-bit card number.
+    fun hidH10302(cn: Long): Long { val w = Wp(37); w.set(cn, 1, 35); w.bit(ev(w.get(1, 18)), 0); w.bit(od(w.get(18, 18)), 36); return w.raw() }
+    // HID Corporate 1000 35-bit (std): FC 12, CN 20, 3 interleaved parity bits (ported verbatim from Proxmark).
+    fun hidC1k35(fc: Long, cn: Long): Long {
+        var bot = 0L; var mid = 0L
+        bot = bot or ((cn and 0xFFFFF) shl 1)
+        bot = bot or ((fc and 0x7FF) shl 21)
+        mid = mid or ((fc and 0x800) shr 11)
+        mid = mid or (ev((mid and 0x1) xor (bot and 0xB6DB6DB6L)) shl 1)
+        bot = bot or od((mid and 0x3) xor (bot and 0x6DB6DB6CL))
+        mid = mid or (od((mid and 0x3) xor (bot and 0xFFFFFFFFL)) shl 2)
+        val p = (mid shl 32) or (bot and 0xFFFFFFFFL)
+        return (1L shl 37) or (1L shl 35) or p
+    }
     fun hidValue(fmt: HIDFormat, fc: Long, cn: Long): Long = when (fmt) {
         HIDFormat.H10301 -> 0x2000000000L or (1L shl 26) or hidWiegand26(fc, cn)
         HIDFormat.H10304 -> hidWiegand37(fc, cn)
+        HIDFormat.D10202 -> hidD10202(fc, cn)
+        HIDFormat.H10306 -> hidH10306(fc, cn)
+        HIDFormat.C1K35 -> hidC1k35(fc, cn)
+        HIDFormat.H10302 -> hidH10302(cn)
         else -> 0
     }
     fun hidBlocksV(v: Long): LongArray {
@@ -223,6 +259,11 @@ object Proto {
 }
 
 enum class HIDFormat(val label: String) {
-    H10301("HID 26-bit (H10301)"), H10304("HID 37-bit (H10304)"),
+    H10301("HID 26-bit (H10301)"),
+    D10202("HID 33-bit (D10202)"),
+    H10306("HID 34-bit (H10306)"),
+    C1K35("HID 35-bit (Corp 1000)"),
+    H10302("HID 37-bit (H10302, no FC)"),
+    H10304("HID 37-bit (H10304)"),
     AWID26("AWID 26-bit"), PARADOX("Paradox"), FDXB("FDX-B")
 }
