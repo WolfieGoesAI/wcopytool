@@ -469,9 +469,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func probeRawRead() {
         let f = parseU32(idFreq.stringValue)
         sendPayload(lfRFConfig(freq: f), "RF config")
-        let lens: [UInt8] = [0x08, 0x10, 0x20, 0x40, 0x60, 0xC0]
-        for (i, n) in lens.enumerated() {
-            afterDelay(0.35 * Double(i + 1)) { [weak self] in self?.sendPayload([0xFF, 0x00, 0x6A, 0x01, 0x00, n], String(format: "probe raw len=0x%02X", n)) }
+        // Fire several reads per length (a single read usually returns the empty 02 07 frame), so a real
+        // 02 0E… data frame is caught. Compare the data-frame byte count across lengths: more bytes at a
+        // larger length = the firmware returns more of the raw FSK stream. Keep the card on the reader.
+        let lens: [UInt8] = [0x08, 0x10, 0x18, 0x20, 0x40]
+        var step = 0.0
+        for n in lens {
+            log(String(format: "— probe len=0x%02X —", n))
+            for _ in 0..<8 {
+                step += 0.14
+                afterDelay(step) { [weak self] in self?.sendPayload([0xFF, 0x00, 0x6A, 0x01, 0x00, n], String(format: "probe len=0x%02X", n)) }
+            }
         }
     }
     func readHID() {
