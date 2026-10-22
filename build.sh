@@ -30,10 +30,11 @@ HOST_ARCH="$(uname -m)"
 want_arm=0; want_x86=1
 if [ "${MOJAVE_ONLY:-0}" = "1" ]; then
   want_arm=0; want_x86=1
-elif [ "${HOST_ARCH}" = "arm64" ]; then
-  want_arm=1; want_x86=1          # universal on Apple Silicon
 else
-  want_arm=0; want_x86=1          # Intel host → x86_64 only
+  # Universal on any host: swiftc cross-compiles the arm64 slice from an Intel runner too, and the
+  # arm64 compile below falls back to x86_64-only if it ever fails. This lets the build run on the
+  # widely-available Intel macOS runner instead of the capacity-constrained Apple Silicon one.
+  want_arm=1; want_x86=1
 fi
 
 THIN=()

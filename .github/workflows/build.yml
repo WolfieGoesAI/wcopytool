@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   macos:
-    runs-on: macos-14            # Apple Silicon runner
+    runs-on: macos-13            # Intel runner (widely available; cross-compiles the arm64 slice too)
     steps:
       - uses: actions/checkout@v4
 
