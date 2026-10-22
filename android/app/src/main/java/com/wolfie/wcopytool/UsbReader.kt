@@ -105,28 +105,6 @@ class UsbReader(private val mgr: UsbManager) {
         if (any == null && lastHex != null) log("read reply (undecoded): $lastHex")
         return any
     }
-    // Experiment: ask the 0x6A reader for more bytes than the usual 8. If the firmware honours a larger
-    // length it should return more of the raw FSK stream (AWID/Paradox need the full 96 bits), which would
-    // make those formats decodable. Logs the full reply for each length so we can see what comes back.
-    fun probeRawRead(freq: Long, log: (String) -> Unit) {
-        transact(Proto.lfRFConfig(freq)); Thread.sleep(120)
-        transact(Proto.lfModeCmd(0x05, freq)); Thread.sleep(40)
-        // A single read usually returns an empty frame; retry each length until a card-data frame (payload
-        // beyond the 07 00 00 header) is caught, then log it. More payload bytes at a larger length = the
-        // firmware returns more of the raw FSK stream. Keep the card on the reader during the probe.
-        for (n in intArrayOf(0x08, 0x10, 0x18, 0x20, 0x40)) {
-            val cmd = intArrayOf(0xFF, 0x00, 0x6A, 0x01, 0x00, n)
-            var got: String? = null
-            for (i in 0 until 16) {
-                val p = transact(cmd, 800)
-                if (p != null && p.payload.size > 3 && p.payload.drop(3).any { it != 0 }) {
-                    got = p.payload.joinToString(" ") { "%02X".format(it) }; break
-                }
-                Thread.sleep(50)
-            }
-            log("len=0x%02X -> %s".format(n, got ?: "(no card data)"))
-        }
-    }
 
     // ---- unified T5577 write (data blocks + config block 0, with password handling) ----
     fun writeCard(dataBlocks: LongArray, baseConfig: Long, protect: Boolean, pwd: String, cur: String, freq: Long, log: (String) -> Unit) {

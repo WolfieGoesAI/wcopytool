@@ -375,8 +375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                           labeled("Card number:", field(hidCN, 100)),
                           ActionButton("Read HID") { [weak self] in self?.readHID() },
                           ActionButton("Write HID") { [weak self] in self?.writeHID() },
-                          ActionButton("Unlock HID") { [weak self] in self?.startHIDUnlock() },
-                          ActionButton("Probe raw") { [weak self] in self?.probeRawRead() }])
+                          ActionButton("Unlock HID") { [weak self] in self?.startHIDUnlock() }])
         hidAnimal.state = .on
         hidAnimal.target = self; hidAnimal.action = #selector(hidEdited)
         let protRow = hstack([hidProtect, field(hidPwd, 100),
@@ -463,25 +462,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
     var hidReadActive = false
     var hidReadRetries = 0
-    // Experiment: ask the 0x6A reader for more than the usual 8 bytes. If the firmware honours a larger
-    // length it returns more of the raw FSK stream (AWID/Paradox need the full 96 bits). The RX lines are
-    // already logged, so we just fire reads at several lengths and read the replies off the log.
-    func probeRawRead() {
-        let f = parseU32(idFreq.stringValue)
-        sendPayload(lfRFConfig(freq: f), "RF config")
-        // Fire several reads per length (a single read usually returns the empty 02 07 frame), so a real
-        // 02 0E… data frame is caught. Compare the data-frame byte count across lengths: more bytes at a
-        // larger length = the firmware returns more of the raw FSK stream. Keep the card on the reader.
-        let lens: [UInt8] = [0x08, 0x10, 0x18, 0x20, 0x40]
-        var step = 0.0
-        for n in lens {
-            log(String(format: "— probe len=0x%02X —", n))
-            for _ in 0..<8 {
-                step += 0.14
-                afterDelay(step) { [weak self] in self?.sendPayload([0xFF, 0x00, 0x6A, 0x01, 0x00, n], String(format: "probe len=0x%02X", n)) }
-            }
-        }
-    }
     func readHID() {
         guard recPhase == .idle, !ulActive, !hidReadActive, !hidUlActive else { log("busy — another operation is running"); return }
         hidReadActive = true; hidReadRetries = 0

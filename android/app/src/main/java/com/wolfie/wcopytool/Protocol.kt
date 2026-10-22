@@ -118,7 +118,14 @@ object Proto {
             33 -> HidRead(raw, HIDFormat.D10202, gf(1, 7), gf(8, 24), 33, par(pb(0) == ev(gf(1, 16)) && pb(32) == od(gf(16, 16))))
             34 -> HidRead(raw, HIDFormat.H10306, gf(1, 16), gf(17, 16), 34, par(pb(0) == ev(gf(1, 16)) && pb(33) == od(gf(17, 16))))
             35 -> HidRead(raw, HIDFormat.C1K35, gf(2, 12), gf(14, 20), 35, "")   // Corp1000 parity is interleaved; not re-checked
-            37 -> HidRead(raw, HIDFormat.H10304, gf(1, 16), gf(17, 19), 37, par(pb(0) == ev(gf(1, 18)) && pb(36) == od(gf(18, 18))) + "  [or H10302 CN=${gf(1, 35)}]")
+            37 -> {
+                val ok = pb(0) == ev(gf(1, 18)) && pb(36) == od(gf(18, 18))
+                // Parity failure on a 37-bit read usually means it is not really HID — an AWID/Paradox
+                // card demodulates to shifting 40-bit garbage this device can't read. Flag that instead
+                // of presenting bogus field values.
+                val note = if (ok) "  [or H10302 CN=${gf(1, 35)}]" else "  (parity fail — likely AWID/Paradox, not readable by this device)"
+                HidRead(raw, HIDFormat.H10304, gf(1, 16), gf(17, 19), 37, note)
+            }
             else -> HidRead(raw, null, 0, 0, len, "length $len not decoded")
         }
     }

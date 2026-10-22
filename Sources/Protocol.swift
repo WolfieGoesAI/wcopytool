@@ -556,7 +556,12 @@ func hidDecodeReply(_ p: [UInt8]) -> (raw: UInt64, fmt: HIDFormat?, fc: UInt32, 
     case 33: return (raw, .d10202, UInt32(gf(1, 7)), UInt32(gf(8, 24)), 33, par(pb(0) == ev(gf(1, 16)) && pb(32) == od(gf(16, 16))))
     case 34: return (raw, .h10306, UInt32(gf(1, 16)), UInt32(gf(17, 16)), 34, par(pb(0) == ev(gf(1, 16)) && pb(33) == od(gf(17, 16))))
     case 35: return (raw, .c1k35, UInt32(gf(2, 12)), UInt32(gf(14, 20)), 35, "")   // Corp1000 interleaved parity not re-checked
-    case 37: return (raw, .h10304, UInt32(gf(1, 16)), UInt32(gf(17, 19)), 37, par(pb(0) == ev(gf(1, 18)) && pb(36) == od(gf(18, 18))) + "  [or H10302 CN=\(gf(1, 35))]")
+    case 37:
+        // Parity failure on a 37-bit read usually means it is not really HID — an AWID/Paradox card
+        // demodulates to shifting 40-bit garbage this device can't read. Flag that instead of bogus values.
+        let ok37 = pb(0) == ev(gf(1, 18)) && pb(36) == od(gf(18, 18))
+        let note37 = ok37 ? "  [or H10302 CN=\(gf(1, 35))]" : "  (parity fail — likely AWID/Paradox, not readable by this device)"
+        return (raw, .h10304, UInt32(gf(1, 16)), UInt32(gf(17, 19)), 37, note37)
     default: return (raw, nil, 0, 0, len, "length \(len) not decoded")
     }
 }
