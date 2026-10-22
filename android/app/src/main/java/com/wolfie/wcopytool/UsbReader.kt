@@ -91,8 +91,13 @@ class UsbReader(private val mgr: UsbManager) {
     private fun writeMode(freq: Long) { transact(Proto.lfModeCmd(0x14, freq)); wset() }
     fun readHID(freq: Long): Proto.HidRead? {
         transact(Proto.lfRFConfig(freq))
-        for (i in 0 until 8) { val r = Proto.hidDecode(transact(Proto.hidReadCmd())); if (r?.fmt != null) return r; Thread.sleep(40) }
-        return null
+        var any: Proto.HidRead? = null
+        for (i in 0 until 10) {
+            val r = Proto.hidDecode(transact(Proto.hidReadCmd()))
+            if (r != null) { if (r.fmt != null) return r; any = r }   // keep a card-present-but-unknown result to report
+            Thread.sleep(40)
+        }
+        return any
     }
 
     // ---- unified T5577 write (data blocks + config block 0, with password handling) ----

@@ -530,28 +530,35 @@ func hidT5Blocks26(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
 
 // HID read command (confirmed): FF 00 6A 01 00 08 → reply payload [0]=0x07 (HID), value in [3...].
 func hidReadCmd() -> [UInt8] { [0xFF, 0x00, 0x6A, 0x01, 0x00, 0x08] }
-// Decode a type-0x07 HID reply payload → (value, format, FC, CN). The 5-byte value at p[3...] is
-// the device value V; its highest set bit selects the format (bit 37 → H10301, bit 36 → H10304).
-// VERIFIED: 07 01 00 20 04 F6 60 73 → 26-bit FC=123/CN=12345; 07 01 00 10 4D 23 C4 81 → 37-bit
-// FC=1234/CN=123456.
-func hidDecodeReply(_ p: [UInt8]) -> (raw: UInt64, fmt: HIDFormat?, fc: UInt32, cn: UInt32)? {
+// Decode a type-0x07 HID reply payload → (value, format, FC, CN, length, note). The 5-byte value at
+// p[3...] is the device value V, returned WITH the HID framing: for 26..36-bit formats the 0x20 header
+// (bit 37) is set and the start sentinel sits at bit = length, so the real length is the highest set
+// bit below bit 37; 37-bit formats carry no header. This is the exact inverse of the encoders. Several
+// formats can share a length (e.g. 37-bit H10304/H10302), so the note flags the alternative / a parity
+// mismatch. VERIFIED: 07 01 00 20 04 F6 60 73 → 26-bit FC=123/CN=12345; 07 01 00 10 4D 23 C4 81 →
+// 37-bit FC=1234/CN=123456.
+func hidDecodeReply(_ p: [UInt8]) -> (raw: UInt64, fmt: HIDFormat?, fc: UInt32, cn: UInt32, len: Int, note: String)? {
     guard p.count >= 8, p[0] == 0x07 else { return nil }
     var raw: UInt64 = 0
     for b in p[3...7] { raw = (raw << 8) | UInt64(b) }   // 5-byte value V
     guard raw != 0 else { return nil }
-    let h = 63 - raw.leadingZeroBitCount                 // highest set bit → format selector
-    var fmt: HIDFormat? = nil, fc: UInt32 = 0, cn: UInt32 = 0
-    switch h {
-    case 37:                                             // H10301 (26-bit)
-        fmt = .h10301
-        let frame = raw & 0x3FFFFFF                      // low 26 bits = Wiegand frame
-        fc = UInt32((frame >> 17) & 0xFF); cn = UInt32((frame >> 1) & 0xFFFF)
-    case 36:                                             // H10304 (37-bit)
-        fmt = .h10304
-        fc = UInt32((raw >> 20) & 0xFFFF); cn = UInt32((raw >> 1) & 0x7FFFF)
-    default: break
+    let hasHdr = (raw & (UInt64(1) << 37)) != 0
+    let len = hasHdr ? 63 - (raw & ((UInt64(1) << 37) - 1)).leadingZeroBitCount : 37
+    guard len >= 26, len <= 37 else { return (raw, nil, 0, 0, len, "unknown length") }
+    let packed = raw & ((UInt64(1) << len) - 1)
+    func gf(_ fb: Int, _ w: Int) -> UInt64 { (packed >> (len - fb - w)) & ((UInt64(1) << w) - 1) }
+    func pb(_ pos: Int) -> UInt64 { (packed >> (len - 1 - pos)) & 1 }
+    func ev(_ x: UInt64) -> UInt64 { UInt64(x.nonzeroBitCount % 2) }
+    func od(_ x: UInt64) -> UInt64 { UInt64((x.nonzeroBitCount + 1) % 2) }
+    func par(_ ok: Bool) -> String { ok ? "" : "  (parity?)" }
+    switch len {
+    case 26: return (raw, .h10301, UInt32(gf(1, 8)), UInt32(gf(9, 16)), 26, par(pb(0) == ev(gf(1, 12)) && pb(25) == od(gf(13, 12))))
+    case 33: return (raw, .d10202, UInt32(gf(1, 7)), UInt32(gf(8, 24)), 33, par(pb(0) == ev(gf(1, 16)) && pb(32) == od(gf(16, 16))))
+    case 34: return (raw, .h10306, UInt32(gf(1, 16)), UInt32(gf(17, 16)), 34, par(pb(0) == ev(gf(1, 16)) && pb(33) == od(gf(17, 16))))
+    case 35: return (raw, .c1k35, UInt32(gf(2, 12)), UInt32(gf(14, 20)), 35, "")   // Corp1000 interleaved parity not re-checked
+    case 37: return (raw, .h10304, UInt32(gf(1, 16)), UInt32(gf(17, 19)), 37, par(pb(0) == ev(gf(1, 18)) && pb(36) == od(gf(18, 18))) + "  [or H10302 CN=\(gf(1, 35))]")
+    default: return (raw, nil, 0, 0, len, "length \(len) not decoded")
     }
-    return (raw, fmt, fc, cn)
 }
 
 func parseU40(_ s: String) -> UInt64 {

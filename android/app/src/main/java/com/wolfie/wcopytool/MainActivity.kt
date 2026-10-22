@@ -211,9 +211,13 @@ class MainActivity : ComponentActivity() {
             Row {
                 Btn("Read HID") { go {
                     val r = reader.readHID(Fmt.parseDec0(freq.value))
-                    val f = r?.fmt
-                    if (r != null && f != null) { fmt.value = f; fc.value = r.fc.toString(); cn.value = r.cn.toString(); log("✓ ${f.label}  FC=${r.fc} CN=${r.cn}") }
-                    else log("✗ no HID card")
+                    if (r == null) { log("✗ no HID card") }
+                    else {
+                        log("raw=%010X  len=%d".format(r.raw, r.len))   // ground-truth bits, in case a field is off
+                        val f = r.fmt
+                        if (f != null) { fmt.value = f; fc.value = r.fc.toString(); cn.value = r.cn.toString(); log("✓ ${f.label}  FC=${r.fc} CN=${r.cn}${r.note}") }
+                        else log("? unrecognised ${r.len}-bit HID ${r.note}")
+                    }
                 } }
                 Spacer(Modifier.width(8.dp))
                 Btn("Write") { go {

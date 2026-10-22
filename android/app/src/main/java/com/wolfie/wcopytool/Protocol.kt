@@ -88,19 +88,38 @@ object Proto {
         for (i in 1..5) id = (id shl 8) or q.payload[i].toLong()
         return id
     }
-    // HID reply: 07 at payload[0], 5-byte value at payload[3..7]; high bit 37→H10301, 36→H10304.
-    data class HidRead(val raw: Long, val fmt: HIDFormat?, val fc: Long, val cn: Long)
+    // HID reply: 07 at payload[0], 5-byte raw value at payload[3..7].
+    data class HidRead(val raw: Long, val fmt: HIDFormat?, val fc: Long, val cn: Long, val len: Int, val note: String)
     fun hidDecode(p: Parsed?): HidRead? {
         val q = p ?: return null
         if (q.payload.size < 8 || q.payload[0] != 0x07) return null
         var raw = 0L
         for (i in 3..7) raw = (raw shl 8) or q.payload[i].toLong()
         if (raw == 0L) return null
-        val h = 63 - java.lang.Long.numberOfLeadingZeros(raw)
-        return when (h) {
-            37 -> HidRead(raw, HIDFormat.H10301, (raw shr 17) and 0xFF, (raw shr 1) and 0xFFFF)
-            36 -> HidRead(raw, HIDFormat.H10304, (raw shr 20) and 0xFFFF, (raw shr 1) and 0x7FFFF)
-            else -> HidRead(raw, null, 0, 0)
+        return decodeHidRaw(raw)
+    }
+    // Decode a raw HID value → format + FC/CN. The device returns the value WITH the HID framing: for
+    // 26..36-bit formats the 0x20 header (bit 37) is set and the start sentinel sits at bit = length, so
+    // the real length is the highest set bit below bit 37; 37-bit formats carry no header. This is the
+    // exact inverse of the encoders. Several formats can share a length (e.g. 37-bit H10304/H10302), so
+    // the note calls out the alternative and flags a parity mismatch.
+    fun decodeHidRaw(raw: Long): HidRead {
+        val hasHdr = (raw and (1L shl 37)) != 0L
+        val len = if (hasHdr) 63 - java.lang.Long.numberOfLeadingZeros(raw and ((1L shl 37) - 1)) else 37
+        if (len < 26 || len > 37) return HidRead(raw, null, 0, 0, len, "unknown length")
+        val packed = raw and ((1L shl len) - 1)
+        fun gf(fb: Int, w: Int) = (packed shr (len - fb - w)) and ((1L shl w) - 1)
+        fun pb(pos: Int) = (packed shr (len - 1 - pos)) and 1L
+        fun ev(x: Long) = java.lang.Long.bitCount(x).toLong() and 1L
+        fun od(x: Long) = (java.lang.Long.bitCount(x).toLong() and 1L) xor 1L
+        fun par(ok: Boolean) = if (ok) "" else "  (parity?)"
+        return when (len) {
+            26 -> HidRead(raw, HIDFormat.H10301, gf(1, 8), gf(9, 16), 26, par(pb(0) == ev(gf(1, 12)) && pb(25) == od(gf(13, 12))))
+            33 -> HidRead(raw, HIDFormat.D10202, gf(1, 7), gf(8, 24), 33, par(pb(0) == ev(gf(1, 16)) && pb(32) == od(gf(16, 16))))
+            34 -> HidRead(raw, HIDFormat.H10306, gf(1, 16), gf(17, 16), 34, par(pb(0) == ev(gf(1, 16)) && pb(33) == od(gf(17, 16))))
+            35 -> HidRead(raw, HIDFormat.C1K35, gf(2, 12), gf(14, 20), 35, "")   // Corp1000 parity is interleaved; not re-checked
+            37 -> HidRead(raw, HIDFormat.H10304, gf(1, 16), gf(17, 19), 37, par(pb(0) == ev(gf(1, 18)) && pb(36) == od(gf(18, 18))) + "  [or H10302 CN=${gf(1, 35)}]")
+            else -> HidRead(raw, null, 0, 0, len, "length $len not decoded")
         }
     }
 

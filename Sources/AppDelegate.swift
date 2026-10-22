@@ -471,12 +471,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
     func handleHIDRead(_ bytes: [UInt8]) {
         guard let (p, _, _, _) = Frame.parse(bytes) else { return }
-        if let r = hidDecodeReply(p), let fmt = r.fmt {
-            hidReadActive = false
-            hidFmtPop.selectItem(at: fmt.rawValue)
-            hidFC.stringValue = String(r.fc); hidCN.stringValue = String(r.cn); hidRefresh()
-            let bits = fmt == .h10301 ? 26 : 37
-            log(String(format: "✓ HID read: FC=%u CN=%u  (raw %llX, %d-bit)", r.fc, r.cn, r.raw, bits))
+        if let r = hidDecodeReply(p) {
+            if let fmt = r.fmt {
+                hidReadActive = false
+                hidFmtPop.selectItem(at: fmt.rawValue)
+                hidFC.stringValue = String(r.fc); hidCN.stringValue = String(r.cn); hidRefresh()
+                log(String(format: "✓ HID read: %@  FC=%u CN=%u  (raw %llX, %d-bit)%@", hidFmtName(fmt), r.fc, r.cn, r.raw, r.len, r.note))
+            } else {
+                hidReadActive = false   // card present but length not in the decode table — surface the raw bits
+                log(String(format: "? HID read: raw %llX, %d-bit — %@", r.raw, r.len, r.note))
+            }
         } else if hidReadRetries < 8 {
             hidReadRetries += 1
             afterDelay(0.2) { [weak self] in self?.sendPayload(hidReadCmd(), "read HID") }
