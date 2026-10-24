@@ -26,7 +26,9 @@ jobs:
           ./build.sh 2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" != "0" ]; then
-            { echo '### Build failed'; echo '```'; grep -E "error:|warning:" build.log | head -60; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            grep -E "error:" build.log | head -40 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
             exit "$rc"
           fi
           ( cd build && zip -r ../dist/wCopyTool-universal.zip wCopyTool.app )
