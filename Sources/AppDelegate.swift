@@ -1192,9 +1192,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // Returns true when it consumed an identity (ASCII) reply; false for a plain status reply so routing continues.
     func handleIdentity(_ bytes: [UInt8]) -> Bool {
         guard let (payload, _, _, _) = Frame.parse(bytes) else { return false }
-        let printable = payload.count >= 4 && payload.allSatisfy { (0x20...0x7e).contains($0) }
-        guard printable else { return false }           // e.g. a 02 07 status frame — ignore, keep waiting
-        let s = asciiOf(payload).trimmingCharacters(in: .whitespaces)
+        // Take the printable run from the start, stopping at the first null/padding byte (device-info and
+        // serial strings are null-padded to the frame length, e.g. "XIXEI X7-P\0\0\0…"). Require a couple
+        // of real characters so a plain status frame (02 07…, payload 00) is ignored and we keep waiting.
+        let prefix = Array(payload.prefix(while: { (0x20...0x7e).contains($0) }))
+        guard prefix.count >= 2 else { return false }
+        let s = (String(bytes: prefix, encoding: .ascii) ?? "").trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty else { return false }
         if idInfo == nil { idInfo = s; sendPayload([0xFF, 0x00, 0x69], "serial number") }   // → serial
         else { idSerial = s; awaitingIdentity = false }
         updateIdentityLabel()
