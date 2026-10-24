@@ -11,7 +11,8 @@ permissions:
 
 jobs:
   macos:
-    runs-on: macos-13            # Intel runner (widely available; cross-compiles the arm64 slice too)
+    runs-on: macos-15            # current GA image (macos-13 closing down, macos-14 retired Oct 2026);
+                                 # Apple Silicon host builds the universal arm64+x86_64 binary natively
     steps:
       - uses: actions/checkout@v4
 
