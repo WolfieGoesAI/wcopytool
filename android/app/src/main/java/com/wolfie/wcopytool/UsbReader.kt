@@ -57,8 +57,8 @@ class UsbReader(private val mgr: UsbManager) {
         return Proto.parse(r)
     }
     // Per-write settle: the T5577 needs time to burn each block before the next command or a readback.
-    // Tunable at runtime from the UI so the minimum safe value can be found; 180 ms is the current baseline.
-    var settleMs: Long = 180L
+    // Fixed at 280 ms to match the macOS app's write gap (sendSeq gap 0.28 s).
+    var settleMs: Long = 280L
     private fun wset() = Thread.sleep(settleMs)
     // A write that must commit: issue it, settle, and (on this flaky link) send it a second time so a
     // dropped first attempt still lands, then settle again. Used for the critical restore/unprotect step.

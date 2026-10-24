@@ -186,44 +186,72 @@ class MainActivity : ComponentActivity() {
                 } }
             }
             RevRow("Unlock also try:", bitRev, byteRev)
-            Spacer(Modifier.height(6.dp))
-            SettleRow()
         }
     }
+
+    // Last raw value a HID read returned, for Raw clone "Use last read".
+    private var lastRawRead: Long? = null
+    private val rawModLabels = listOf("FSK2a RF/50", "FSK2a RF/64", "FSK2 RF/50",
+        "Manchester RF/32", "Manchester RF/32 +ST", "Manchester RF/40", "Manchester RF/64 +ST",
+        "Biphase RF/32", "Biphase RF/50")
 
     @Composable
     fun HidTab(freq: MutableState<String>, keyText: MutableState<String>, go: (() -> Unit) -> Unit) {
         val fmt = remember { mutableStateOf(HIDFormat.H10301) }
         val fc = remember { mutableStateOf("0") }
         val cn = remember { mutableStateOf("0") }
-        val animal = remember { mutableStateOf(true) }
+        val rawHex = remember { mutableStateOf("") }
+        val rawMod = remember { mutableStateOf(0) }
         val protect = remember { mutableStateOf(false) }
         val pwd = remember { mutableStateOf("00000000") }
         val cur = remember { mutableStateOf("00000000") }
         val bitRev = remember { mutableStateOf(false) }
         val byteRev = remember { mutableStateOf(false) }
         Column {
-            Picker("Format", HIDFormat.values().toList(), fmt.value, { it.label }) { fmt.value = it }
-            val isFdx = fmt.value == HIDFormat.FDXB
-            HexField(if (isFdx) "Country code" else "Facility code", fc)
-            HexField(if (isFdx) "National ID (38-bit)" else "Card number", cn)
-            if (isFdx) CheckRow("FDX-B animal flag", animal)
+            HidFormatPicker(fmt.value) { fmt.value = it }
+            val f = fmt.value
+            val isFdx = f == HIDFormat.FDXB_A0 || f == HIDFormat.FDXB_A1
+            val isDestron = f == HIDFormat.DESTRON
+            val isRaw = f == HIDFormat.RAWCLONE
+            val singleId = f == HIDFormat.VIKING || f == HIDFormat.VISA2000 || f == HIDFormat.NORALSY
+            when {
+                isRaw -> {
+                    HexField("Raw block data (hex)", rawHex)
+                    Picker("Modulation", rawModLabels.indices.toList(), rawMod.value, { rawModLabels[it] }) { rawMod.value = it }
+                    Row { Btn("Use last read") {
+                        val v = lastRawRead
+                        if (v == null) log("No previous read to clone — read a card first.")
+                        else { rawHex.value = Proto.hidBlocksV(v).joinToString(" ") { "%08X".format(it) }; rawMod.value = 0; log("Raw clone loaded from last read: %010X".format(v)) }
+                    } }
+                }
+                isFdx -> { HexField("Country code", fc); HexField("National ID (decimal, 38-bit)", cn) }
+                isDestron -> HexField("UID (hex, ≤5 bytes)", cn)
+                singleId -> HexField("Card number (decimal id)", cn)
+                else -> { HexField("Facility code", fc); HexField("Card number", cn) }
+            }
             Row {
                 Btn("Read HID") { go {
                     val r = reader.readHID(Fmt.parseDec0(freq.value), ::log)
                     if (r == null) { log("✗ no HID card") }
                     else {
-                        log("raw=%010X  len=%d".format(r.raw, r.len))   // ground-truth bits, in case a field is off
-                        val f = r.fmt
-                        if (f != null) { fmt.value = f; fc.value = r.fc.toString(); cn.value = r.cn.toString(); log("✓ ${f.label}  FC=${r.fc} CN=${r.cn}${r.note}") }
-                        else log("? unrecognised ${r.len}-bit HID ${r.note}")
+                        lastRawRead = r.raw
+                        log("raw=%010X  len=%d".format(r.raw, r.len))   // ground-truth bits
+                        val rf = r.fmt
+                        if (rf != null) { fmt.value = rf; fc.value = r.fc.toString(); cn.value = r.cn.toString(); log("✓ ${rf.label}  FC=${r.fc} CN=${r.cn}${r.note}") }
+                        else log("? ${r.note} — use Raw clone → ‘Use last read’ to clone it verbatim")
                     }
                 } }
                 Spacer(Modifier.width(8.dp))
                 Btn("Write") { go {
-                    val f = fmt.value
-                    val blocks = Proto.lfProxBlocks(f, Fmt.parseDec(fc.value), Fmt.parseDec(cn.value), Fmt.parseDec(cn.value), animal.value)
-                    reader.writeCard(blocks, Proto.lfProxConfig(f), protect.value, pwd.value, cur.value, Fmt.parseDec0(freq.value), ::log)
+                    val blocks: LongArray; val cfg: Long
+                    when (f) {
+                        HIDFormat.RAWCLONE -> { blocks = Proto.rawCloneBlocks(rawHex.value); cfg = Proto.rawCloneConfig(rawMod.value, blocks.size) }
+                        HIDFormat.DESTRON -> { blocks = Proto.destronBlocks(Proto.hexBytes(cn.value, 5)); cfg = Proto.lfProxConfig(f) }
+                        else -> { blocks = Proto.lfProxBlocks(f, Fmt.parseDec(fc.value), Fmt.parseDec(cn.value), Fmt.parseId(cn.value)); cfg = Proto.lfProxConfig(f) }
+                    }
+                    if (blocks.isEmpty()) { log("nothing to write"); return@go }
+                    log("${f.label} → ${blocks.size} blocks, config %08X".format(cfg))
+                    reader.writeCard(blocks, cfg, protect.value, pwd.value, cur.value, Fmt.parseDec0(freq.value), ::log)
                 } }
             }
             CheckRow("Write-protect with password:", protect); HexField("New password", pwd)
@@ -235,6 +263,31 @@ class MainActivity : ComponentActivity() {
                 } }
             }
             RevRow("Unlock also try:", bitRev, byteRev)
+        }
+    }
+
+    // Format picker grouped by modulation, with greyed section headers (disabled) and dividers.
+    @Composable fun HidFormatPicker(sel: HIDFormat, onPick: (HIDFormat) -> Unit) {
+        var open by remember { mutableStateOf(false) }
+        val groups = listOf(
+            "HID Prox (FSK) — read + write" to listOf(HIDFormat.H10301, HIDFormat.TECOM27, HIDFormat.W2804, HIDFormat.ATSW30, HIDFormat.ADT31, HIDFormat.KASTLE, HIDFormat.D10202, HIDFormat.H10306, HIDFormat.C1K35, HIDFormat.C15001, HIDFormat.S12906, HIDFormat.H10302, HIDFormat.H10304),
+            "Other FSK — write-only" to listOf(HIDFormat.AWID26, HIDFormat.AWID34, HIDFormat.PARADOX, HIDFormat.PYRAMID, HIDFormat.IOPROX, HIDFormat.DESTRON),
+            "ASK / Manchester — write-only" to listOf(HIDFormat.VIKING, HIDFormat.VISA2000, HIDFormat.NORALSY, HIDFormat.PRESCO),
+            "Animal (DIPHASE) — write-only" to listOf(HIDFormat.FDXB_A0, HIDFormat.FDXB_A1),
+            "Raw / clone" to listOf(HIDFormat.RAWCLONE)
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Format:", fontSize = 12.sp); Spacer(Modifier.width(6.dp))
+            Box {
+                OutlinedButton(onClick = { open = true }) { Text(sel.label, fontSize = 12.sp) }
+                DropdownMenu(open, { open = false }) {
+                    groups.forEachIndexed { gi, (header, items) ->
+                        DropdownMenuItem(enabled = false, text = { Text(header, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }, onClick = {})
+                        items.forEach { it0 -> DropdownMenuItem(text = { Text("   " + it0.label, fontSize = 12.sp) }, onClick = { onPick(it0); open = false }) }
+                        if (gi < groups.size - 1) HorizontalDivider()
+                    }
+                }
+            }
         }
     }
 
@@ -279,21 +332,6 @@ class MainActivity : ComponentActivity() {
     }
     @Composable fun CheckRow(label: String, s: MutableState<Boolean>) =
         Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(s.value, { s.value = it }); Text(label, fontSize = 12.sp) }
-    // Per-write settle time (ms), editable so the minimum safe value can be found on real hardware.
-    @Composable fun SettleRow() {
-        val s = remember { mutableStateOf(reader.settleMs.toString()) }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Settle (ms):", fontSize = 12.sp); Spacer(Modifier.width(6.dp))
-            OutlinedTextField(
-                value = s.value,
-                onValueChange = { v -> val d = v.filter { it.isDigit() }.take(4); s.value = d; d.toLongOrNull()?.let { reader.settleMs = it } },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
-                modifier = Modifier.width(96.dp)
-            )
-        }
-    }
     @Composable fun RevRow(label: String, bitRev: MutableState<Boolean>, byteRev: MutableState<Boolean>) =
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(label, fontSize = 12.sp); Spacer(Modifier.width(6.dp))

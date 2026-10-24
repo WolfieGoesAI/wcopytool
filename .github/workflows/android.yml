@@ -48,7 +48,14 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: |
+          set +e
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" != "0" ]; then
+            grep -E "^e: |error:" build.log | head -40 | while IFS= read -r line; do echo "::error::${line}"; done
+            exit "$rc"
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
