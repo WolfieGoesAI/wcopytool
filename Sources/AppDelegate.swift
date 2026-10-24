@@ -61,7 +61,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let hidProtect = NSButton(checkboxWithTitle: "Write-protect with password:", target: nil, action: nil)
     let hidPwd = NSTextField(string: "00000000")
     let hidUnlock = NSTextField(string: "00000000")   // the card's CURRENT password (for re-writing a protected card)
-    let hidAnimal = NSButton(checkboxWithTitle: "FDX-B animal flag", target: nil, action: nil)
     let lfProtect = NSButton(checkboxWithTitle: "Password-protect written card with password:", target: nil, action: nil)
     let lfT5Found = NSTextField(string: "00000000")   // editable: found or user-entered password
     let lfEMFound = NSTextField(string: "00000000")
@@ -367,7 +366,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         // Build the format menu with separator lines between the HID group and AWID, and between
         // Paradox and FDX-B. nil = separator. The format is carried on each item's representedObject so
         // the separators don't shift any index-based mapping.
-        let fmtOrder: [HIDFormat?] = [.h10301, .d10202, .h10306, .c1k35, .h10302, .h10304, nil, .awid26, .paradox, nil, .fdxb]
+        let fmtOrder: [HIDFormat?] = [.h10301, .d10202, .h10306, .c1k35, .h10302, .h10304, nil, .awid26, .paradox, nil, .fdxbA0, .fdxbA1]
         let fmtMenu = NSMenu()
         for f in fmtOrder {
             if let f = f {
@@ -387,10 +386,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                           ActionButton("Read HID") { [weak self] in self?.readHID() },
                           ActionButton("Write HID") { [weak self] in self?.writeHID() },
                           ActionButton("Unlock HID") { [weak self] in self?.startHIDUnlock() }])
-        hidAnimal.state = .on
-        hidAnimal.target = self; hidAnimal.action = #selector(hidEdited)
         let protRow = hstack([hidProtect, field(hidPwd, 100),
-                              labeled("Current card password:", field(hidUnlock, 100)), hidAnimal])
+                              labeled("Current card password:", field(hidUnlock, 100))])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
         hidRefresh()
         let revRow = hstack([NSTextField(labelWithString: "Unlock HID also try:"), hidBitRev, hidByteRev])
@@ -408,7 +405,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // all others use FC/CN. Returns 3 blocks (HID/AWID/Paradox) or 4 (FDX-B).
     func lfBlocksFor(_ fmt: HIDFormat) -> [UInt32] {
         let fc = parseU32(hidFC.stringValue)
-        if fmt == .fdxb { return fdxbBlocks(country: fc, national: parseU40(hidCN.stringValue), animal: hidAnimal.state == .on) }
+        if fmt == .fdxbA0 || fmt == .fdxbA1 { return fdxbBlocks(country: fc, national: parseU40(hidCN.stringValue), animal: fmt == .fdxbA1) }
         if fmt == .h10302 { return hidT5BlocksV(hidH10302(parseU40(hidCN.stringValue) & 0x7FFFFFFFF)) }  // 35-bit CN
         return lfProxBlocks(fmt, fc, parseU32(hidCN.stringValue))
     }
@@ -422,7 +419,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         case .h10304: return "HID 37-bit (H10304)"
         case .awid26: return "AWID 26-bit"
         case .paradox: return "Paradox"
-        case .fdxb:   return "FDX-B"
+        case .fdxbA0: return "FDX-B (Animal flag 0)"
+        case .fdxbA1: return "FDX-B (Animal flag 1)"
         }
     }
     func hidRefresh() {
@@ -430,8 +428,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let b = lfBlocksFor(fmt)
         let cfg = lfProxConfig(fmt)
         let ids: String
-        if fmt == .fdxb {
-            ids = String(format: "Country %u, National %llu", parseU32(hidFC.stringValue), parseU40(hidCN.stringValue))
+        if fmt == .fdxbA0 || fmt == .fdxbA1 {
+            ids = String(format: "Country %u, National %llu, Animal %d", parseU32(hidFC.stringValue), parseU40(hidCN.stringValue), fmt == .fdxbA1 ? 1 : 0)
         } else if fmt == .h10302 {
             ids = String(format: "CN %llu", parseU40(hidCN.stringValue) & 0x7FFFFFFFF)   // 35-bit, no FC
         } else {
@@ -450,8 +448,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         // The card's CURRENT password — needed to re-write or unprotect a card that already has one.
         let cur = fieldKey(hidUnlock.stringValue)
         let cfg = u32be(lfProxConfig(fmt) | (protect ? 0x10 : 0))   // PWD bit 0x10 when protecting
-        let ids = fmt == .fdxb
-            ? String(format: "Country=%u National=%llu", parseU32(hidFC.stringValue), parseU40(hidCN.stringValue))
+        let ids = (fmt == .fdxbA0 || fmt == .fdxbA1)
+            ? String(format: "Country=%u National=%llu Animal=%d", parseU32(hidFC.stringValue), parseU40(hidCN.stringValue), fmt == .fdxbA1 ? 1 : 0)
             : String(format: "FC=%u CN=%u", parseU32(hidFC.stringValue), parseU32(hidCN.stringValue))
         log("\(hidFmtName(fmt)) write \(ids) → \(data.count) data blocks, config \(hexJoin(cfg)) (current pwd \(hexJoin(cur)))")
         var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config")]
@@ -1252,7 +1250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                 log(String(format: "✓ write verified: card now reads %010llX.", id))
             } else {
                 log(String(format: "✗ write did NOT take: card still reads %010llX (wanted %010llX).", id, want))
-                log("  The device ACKs (02 07 00) but the chip still reads the old id. Use \u{201C}Revive LF (rewrite)\u{201D} or \u{201C}Write all LF\u{201D} — they normalise the password and write op12+op13, which is what the original app does to write/revive a protected card.")
+                log("  The card is likely password-protected. Enter its password in the Unlock field and run \u{201C}Unlock T5577\u{201D}/\u{201C}Unlock EM4305\u{201D} first, then write again.")
             }
         }
         else if let id = recEMid(bytes) { setCardId(id) }  // Read ID → Card # (in the selected format)

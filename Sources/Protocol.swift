@@ -311,12 +311,12 @@ let kT5HIDConfigWire: [UInt8] = [0x00,0x10,0x70,0x60]
 
 // LF prox formats this app can write. HID 26/37 are capture-verified; AWID 26 is spec-based
 // (Proxmark getAWIDBits) and WRITE-ONLY (this reader can't read AWID back) — verify on another reader.
-enum HIDFormat: Int { case h10301 = 0, d10202 = 1, h10306 = 2, c1k35 = 3, h10302 = 4, h10304 = 5, awid26 = 6, paradox = 7, fdxb = 8 }
+enum HIDFormat: Int { case h10301 = 0, d10202 = 1, h10306 = 2, c1k35 = 3, h10302 = 4, h10304 = 5, awid26 = 6, paradox = 7, fdxbA0 = 8, fdxbA1 = 9 }
 
 // Base T5577 config (block 0) per format. The PWD bit (0x10) is OR'd in by the caller when protecting.
 func lfProxConfig(_ fmt: HIDFormat) -> UInt32 {
     switch fmt {
-    case .fdxb: return 0x00098080    // DIPHASE, RF/32, 4 data blocks (128-bit FDX-B stream)
+    case .fdxbA0, .fdxbA1: return 0x00098080    // DIPHASE, RF/32, 4 data blocks (128-bit FDX-B stream)
     default:    return 0x00107060    // FSK2a, RF/50, 3 data blocks (HID / AWID / Paradox)
     }
 }
@@ -505,7 +505,7 @@ func hidValue(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> UInt64 {
     case .d10202: return hidD10202(fc, cn)
     case .h10306: return hidH10306(fc, cn)
     case .c1k35:  return hidC1k35(fc, cn)
-    case .h10302, .awid26, .paradox, .fdxb: return 0  // built by their own block builders, not this path
+    case .h10302, .awid26, .paradox, .fdxbA0, .fdxbA1: return 0  // built by their own block builders, not this path
     }
 }
 
