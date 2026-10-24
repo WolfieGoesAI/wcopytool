@@ -272,26 +272,6 @@ object Proto {
         put(crc, 8); pre[pos] = 1; pre[pos + 1] = 1
         return packBlocks(pre.toList(), 2)
     }
-    // Pyramid / Farpointe (FSK2a RF/50) — 128-bit, per Proxmark getPyramidBits.
-    fun pyramidBlocks(fc: Long, cn: Long): LongArray {
-        val pre = IntArray(128); pre[79] = 1
-        val wp = wiegandAddParity((bitsMSB(fc, 8).toList() + bitsMSB(cn, 16).toList()))
-        for ((i, b) in wp.withIndex()) pre[80 + i] = b
-        val body = addParityOdd(pre.toList().subList(8, 128), 102, 8)
-        val out = IntArray(128); for ((i, b) in body.withIndex()) out[8 + i] = b
-        val cs = IntArray(13); for (i in 0 until 13) { var byte = 0; for (k in 0 until 8) byte = (byte shl 1) or out[16 + i * 8 + k]; cs[i] = byte }
-        bitsMSB(crc8Maxim(cs).toLong(), 8).let { for (i in it.indices) out[120 + i] = it[i] }
-        return packBlocks(out.toList(), 4)
-    }
-    // Destron / FDX-A FECAVA (FSK2 RF/50) — 96-bit, per Proxmark. uid: up to 5 bytes.
-    fun destronBlocks(uid: IntArray): LongArray {
-        val dataEx = IntArray(12 + 24); val n = minOf(uid.size, 5)
-        for (i in 0 until n) { val opb = java.lang.Integer.bitCount(uid[i] and 0xFF) and 1; dataEx[i + 1] = (uid[i] or (opb shl 7)).inv() and 0xFF }
-        val blk = LongArray(4)
-        for (i in 0 until 3) blk[i + 1] = manch2((dataEx[i * 2].toLong() shl 8) + dataEx[i * 2 + 1].toLong())
-        blk[1] = (blk[1] and 0xFFFFL) or 0xAAE20000L
-        return longArrayOf(blk[1], blk[2], blk[3])
-    }
     // Viking (Manchester RF/32) — 64-bit: 0xF2 preamble, 32-bit id, XOR checksum.
     fun vikingBlocks(id: Long): LongArray {
         val idv = id and 0xFFFFFFFFL
@@ -394,8 +374,6 @@ object Proto {
     fun lfProxConfig(fmt: HIDFormat): Long = when (fmt) {
         HIDFormat.FDXB_A0, HIDFormat.FDXB_A1 -> 0x00098080L   // DIPHASE RF/32 (128-bit FDX-B)
         HIDFormat.IOPROX -> 0x00147040L                       // FSK2a RF/64
-        HIDFormat.PYRAMID -> 0x00107080L                      // FSK2a RF/50, 4 blocks
-        HIDFormat.DESTRON -> 0x00105060L                      // FSK2  RF/50
         HIDFormat.VIKING -> 0x00088040L                       // Manchester RF/32
         HIDFormat.VISA2000 -> 0x00148068L                     // Manchester RF/64 +ST
         HIDFormat.NORALSY -> 0x00088068L                      // Manchester RF/32 +ST
@@ -407,8 +385,7 @@ object Proto {
         HIDFormat.AWID26 -> awidBlocks(26, fc, cn)
         HIDFormat.AWID34 -> awidBlocks(34, fc, cn)
         HIDFormat.PARADOX -> paradoxBlocks(fc, cn)
-        HIDFormat.PYRAMID -> pyramidBlocks(fc, cn)
-        HIDFormat.IOPROX -> ioproxBlocks(1, fc, cn)
+        HIDFormat.IOPROX -> ioproxBlocks(1, fc, cn)   // write-only
         HIDFormat.VIKING -> vikingBlocks(cn)
         HIDFormat.VISA2000 -> visa2000Blocks(cn)
         HIDFormat.NORALSY -> noralsyBlocks(cn, 2000)
@@ -448,9 +425,7 @@ enum class HIDFormat(val label: String) {
     AWID26("AWID 26-bit"),
     AWID34("AWID 34-bit"),
     PARADOX("Paradox"),
-    PYRAMID("Pyramid (Farpointe)"),
     IOPROX("ioProx (Kantech)"),
-    DESTRON("FDX-A / Destron (animal)"),
     VIKING("Viking"),
     VISA2000("Visa2000"),
     NORALSY("Noralsy"),

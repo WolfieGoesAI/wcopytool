@@ -376,7 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             .fmt(.d10202), .fmt(.h10306), .fmt(.c1k35), .fmt(.c15001), .fmt(.s12906),
             .fmt(.h10302), .fmt(.h10304),
             .sep, .header("Other FSK — write-only"),
-            .fmt(.awid26), .fmt(.awid34), .fmt(.paradox), .fmt(.pyramid), .fmt(.ioprox), .fmt(.destron),
+            .fmt(.awid26), .fmt(.awid34), .fmt(.paradox), .fmt(.ioprox),
             .sep, .header("ASK / Manchester — write-only"),
             .fmt(.viking), .fmt(.visa2000), .fmt(.noralsy), .fmt(.presco),
             .sep, .header("Animal (DIPHASE) — write-only"),
@@ -440,7 +440,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let fc = parseU32(hidFC.stringValue)
         if fmt == .fdxbA0 || fmt == .fdxbA1 { return fdxbBlocks(country: fc, national: parseU40(hidCN.stringValue), animal: fmt == .fdxbA1) }
         if fmt == .h10302 { return hidT5BlocksV(hidH10302(parseU40(hidCN.stringValue) & 0x7FFFFFFFF)) }  // 35-bit CN
-        if fmt == .destron { return destronBlocks(hexBytes(hidCN.stringValue, max: 5)) }   // UID hex (CN field)
         if fmt == .rawclone { return rawBlocks() }
         return lfProxBlocks(fmt, fc, parseU32(hidCN.stringValue))
     }
@@ -507,9 +506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         case .awid26: return "AWID 26-bit"
         case .awid34: return "AWID 34-bit"
         case .paradox: return "Paradox"
-        case .pyramid: return "Pyramid (Farpointe)"
         case .ioprox: return "ioProx (Kantech)"
-        case .destron: return "FDX-A / Destron (animal)"
         case .viking: return "Viking"
         case .visa2000: return "Visa2000"
         case .noralsy: return "Noralsy"
@@ -537,8 +534,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             return String(format: "CN %llu", parseU40(hidCN.stringValue) & 0x7FFFFFFFF)
         case .viking, .visa2000, .noralsy:
             return String(format: "ID %u", parseU32(hidCN.stringValue))               // single 32-bit id (CN field)
-        case .destron:
-            return "UID " + hexBytes(hidCN.stringValue, max: 5).map { String(format: "%02X", $0) }.joined()
         case .rawclone:
             return "raw " + (rawHex.stringValue.isEmpty ? "(empty)" : rawHex.stringValue)
         default:

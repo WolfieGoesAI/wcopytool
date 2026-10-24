@@ -213,7 +213,6 @@ class MainActivity : ComponentActivity() {
             HidFormatPicker(fmt.value) { fmt.value = it }
             val f = fmt.value
             val isFdx = f == HIDFormat.FDXB_A0 || f == HIDFormat.FDXB_A1
-            val isDestron = f == HIDFormat.DESTRON
             val isRaw = f == HIDFormat.RAWCLONE
             val singleId = f == HIDFormat.VIKING || f == HIDFormat.VISA2000 || f == HIDFormat.NORALSY
             when {
@@ -227,7 +226,6 @@ class MainActivity : ComponentActivity() {
                     } }
                 }
                 isFdx -> { HexField("Country code", fc); HexField("National ID (decimal, 38-bit)", cn) }
-                isDestron -> HexField("UID (hex, ≤5 bytes)", cn)
                 singleId -> HexField("Card number (decimal id)", cn)
                 else -> { HexField("Facility code", fc); HexField("Card number", cn) }
             }
@@ -248,7 +246,6 @@ class MainActivity : ComponentActivity() {
                     val blocks: LongArray; val cfg: Long
                     when (f) {
                         HIDFormat.RAWCLONE -> { blocks = Proto.rawCloneBlocks(rawHex.value); cfg = Proto.rawCloneConfig(rawMod.value, blocks.size) }
-                        HIDFormat.DESTRON -> { blocks = Proto.destronBlocks(Proto.hexBytes(cn.value, 5)); cfg = Proto.lfProxConfig(f) }
                         else -> { blocks = Proto.lfProxBlocks(f, Fmt.parseDec(fc.value), Fmt.parseDec(cn.value), Fmt.parseId(cn.value)); cfg = Proto.lfProxConfig(f) }
                     }
                     if (blocks.isEmpty()) { log("nothing to write"); return@go }
@@ -273,7 +270,7 @@ class MainActivity : ComponentActivity() {
         var open by remember { mutableStateOf(false) }
         val groups = listOf(
             "HID Prox (FSK) — read + write" to listOf(HIDFormat.H10301, HIDFormat.TECOM27, HIDFormat.W2804, HIDFormat.ATSW30, HIDFormat.ADT31, HIDFormat.KASTLE, HIDFormat.D10202, HIDFormat.H10306, HIDFormat.C1K35, HIDFormat.C15001, HIDFormat.S12906, HIDFormat.H10302, HIDFormat.H10304),
-            "Other FSK — write-only" to listOf(HIDFormat.AWID26, HIDFormat.AWID34, HIDFormat.PARADOX, HIDFormat.PYRAMID, HIDFormat.IOPROX, HIDFormat.DESTRON),
+            "Other FSK — write-only" to listOf(HIDFormat.AWID26, HIDFormat.AWID34, HIDFormat.PARADOX, HIDFormat.IOPROX),
             "ASK / Manchester — write-only" to listOf(HIDFormat.VIKING, HIDFormat.VISA2000, HIDFormat.NORALSY, HIDFormat.PRESCO),
             "Animal (DIPHASE) — write-only" to listOf(HIDFormat.FDXB_A0, HIDFormat.FDXB_A1),
             "Raw / clone" to listOf(HIDFormat.RAWCLONE)

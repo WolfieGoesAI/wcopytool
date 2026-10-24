@@ -315,7 +315,7 @@ enum HIDFormat: Int {
     case h10301 = 0, tecom27, w2804, atsw30, adt31, kastle,
          d10202, h10306, c1k35, c15001, s12906,
          h10302, h10304,
-         awid26, awid34, paradox, pyramid, ioprox, destron,
+         awid26, awid34, paradox, ioprox,
          viking, visa2000, noralsy, presco,
          fdxbA0, fdxbA1,
          rawclone
@@ -329,8 +329,6 @@ func lfProxConfig(_ fmt: HIDFormat) -> UInt32 {
     switch fmt {
     case .fdxbA0, .fdxbA1: return 0x00098080    // DIPHASE, RF/32, 4 data blocks (128-bit FDX-B stream)
     case .ioprox:   return 0x00147040           // FSK2a RF/64, 2 data blocks (64-bit)
-    case .pyramid:  return 0x00107080           // FSK2a RF/50, 4 data blocks (128-bit)
-    case .destron:  return 0x00105060           // FSK2  RF/50, 3 data blocks (96-bit, FDX-A)
     case .viking:   return 0x00088040           // Manchester RF/32, 2 data blocks (64-bit)
     case .visa2000: return 0x00148068           // Manchester RF/64 +ST, 3 data blocks (96-bit)
     case .noralsy:  return 0x00088068           // Manchester RF/32 +ST, 3 data blocks (96-bit)
@@ -477,29 +475,6 @@ func ioproxBlocks(_ version: UInt32, _ fc: UInt32, _ cn: UInt32) -> [UInt32] {
     put(crc, 8); pre[pos] = SEP; pre[pos + 1] = SEP
     return packBlocks(pre, 2)
 }
-// Pyramid / Farpointe (FSK2a RF/50) → four data blocks (128-bit), per Proxmark getPyramidBits.
-func pyramidBlocks(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
-    var pre = [Int](repeating: 0, count: 128); pre[79] = 1
-    let wp = wiegandAddParity(bitsMSB(UInt64(fc), 8) + bitsMSB(UInt64(cn), 16))   // 26 bits
-    for (i, b) in wp.enumerated() { pre[80 + i] = b }
-    let body = addParityOdd(Array(pre[8...]), 102, 8)      // 120 bits
-    var out = [Int](repeating: 0, count: 128)
-    for (i, b) in body.enumerated() { out[8 + i] = b }
-    var csBuff = [UInt8]()
-    for i in 0..<13 { var byte: UInt8 = 0; for k in 0..<8 { byte = (byte << 1) | UInt8(out[16 + i * 8 + k]) }; csBuff.append(byte) }
-    for (i, b) in bitsMSB(UInt64(crc8Maxim(csBuff)), 8).enumerated() { out[120 + i] = b }
-    return packBlocks(out, 4)
-}
-// Destron / FDX-A FECAVA (FSK2 RF/50) → three data blocks (96-bit), per Proxmark. uid: up to 5 bytes.
-func destronBlocks(_ uid: [UInt8]) -> [UInt32] {
-    var dataEx = [UInt8](repeating: 0, count: 12 + 24)
-    let n = min(uid.count, 5)
-    for i in 0..<n { let op = UInt8(bitsMSB(UInt64(uid[i]), 8).reduce(0, +) & 1); dataEx[i + 1] = ~(uid[i] | (op << 7)) }
-    var blk = [UInt32](repeating: 0, count: 4)
-    for i in 0..<3 { blk[i + 1] = manchesterEncode2Bytes((UInt32(dataEx[i * 2]) << 8) + UInt32(dataEx[i * 2 + 1])) }
-    blk[1] = (blk[1] & 0xFFFF) | 0xAAE20000
-    return [blk[1], blk[2], blk[3]]
-}
 // Viking (Manchester RF/32) → two data blocks (64-bit): 0xF2 preamble, 32-bit id, XOR checksum.
 func vikingBlocks(_ id: UInt32) -> [UInt32] {
     let chk = ((id >> 24) & 0xFF) ^ ((id >> 16) & 0xFF) ^ ((id >> 8) & 0xFF) ^ (id & 0xFF) ^ 0xF2 ^ 0xA8
@@ -541,8 +516,7 @@ func lfProxBlocks(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> [UInt32] {
     case .awid26:  return awidBlocks(26, fc, cn)
     case .awid34:  return awidBlocks(34, fc, cn)
     case .paradox: return paradoxBlocks(fc, cn)
-    case .pyramid: return pyramidBlocks(fc, cn)
-    case .ioprox:  return ioproxBlocks(1, fc, cn)          // version fixed at 1 (most common)
+    case .ioprox:  return ioproxBlocks(1, fc, cn)          // version fixed at 1 (most common); write-only
     case .viking:  return vikingBlocks(cn)                 // single 32-bit card id (CN field; FC ignored)
     case .visa2000: return visa2000Blocks(cn)
     case .noralsy: return noralsyBlocks(cn, 2000)
@@ -654,7 +628,7 @@ func hidValue(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> UInt64 {
     case .kastle: return hidKastle(fc, cn)
     case .c15001: return hidC15001(fc, cn)
     case .s12906: return hidS12906(fc, cn)
-    case .h10302, .awid26, .awid34, .paradox, .pyramid, .ioprox, .destron,
+    case .h10302, .awid26, .awid34, .paradox, .ioprox,
          .viking, .visa2000, .noralsy, .presco, .fdxbA0, .fdxbA1, .rawclone:
         return 0  // built by their own block builders, not this path
     }
