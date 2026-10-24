@@ -107,7 +107,7 @@ class UsbReader(private val mgr: UsbManager) {
     }
 
     // ---- unified T5577 write (data blocks + config block 0, with password handling) ----
-    fun writeCard(dataBlocks: LongArray, baseConfig: Long, protect: Boolean, pwd: String, cur: String, freq: Long, log: (String) -> Unit) {
+    fun writeCard(dataBlocks: LongArray, baseConfig: Long, protect: Boolean, pwd: String, cur: String, freq: Long, log: (String) -> Unit, hidFinalize: Boolean = true) {
         val zero = intArrayOf(0, 0, 0, 0)
         val setPwd = if (protect) Proto.fieldKey(pwd) else zero
         val curK = Proto.fieldKey(cur)
@@ -127,7 +127,9 @@ class UsbReader(private val mgr: UsbManager) {
         dataBlocks.forEachIndexed { i, w -> blocks.add((i + 1) to Proto.u32be(w)) }
         blocks.add(0 to cfg)
         for ((blk, data) in blocks) { seq.add(Proto.lfT5WriteNoPwd(blk, data, freq)); for (pw in d) seq.add(Proto.lfT5Write(blk, data, pw, freq)) }
-        seq.add(Proto.lfModeCmd(0x64, freq))
+        // 0x64 "HID finalize" re-processes the card as HID — correct for HID Prox (and harmless for
+        // Manchester/EM configs) but corrupts a non-HID FSK payload sharing the HID config word.
+        if (hidFinalize) seq.add(Proto.lfModeCmd(0x64, freq))
         sendSeq(seq, log)
         log("done")
     }

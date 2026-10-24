@@ -252,8 +252,10 @@ class MainActivity : ComponentActivity() {
                         else -> { blocks = Proto.lfProxBlocks(f, Fmt.parseDec(fc.value), Fmt.parseDec(cn.value), Fmt.parseId(cn.value)); cfg = Proto.lfProxConfig(f) }
                     }
                     if (blocks.isEmpty()) { log("nothing to write"); return@go }
+                    // Skip the 0x64 HID finalize for non-HID FSK payloads (it would re-process them as HID).
+                    val noFinalize = f in setOf(HIDFormat.AWID26, HIDFormat.AWID34, HIDFormat.PARADOX, HIDFormat.PYRAMID, HIDFormat.IOPROX, HIDFormat.DESTRON)
                     log("${f.label} → ${blocks.size} blocks, config %08X".format(cfg))
-                    reader.writeCard(blocks, cfg, protect.value, pwd.value, cur.value, Fmt.parseDec0(freq.value), ::log)
+                    reader.writeCard(blocks, cfg, protect.value, pwd.value, cur.value, Fmt.parseDec0(freq.value), ::log, hidFinalize = !noFinalize)
                 } }
             }
             CheckRow("Write-protect with password:", protect); HexField("New password", pwd)
