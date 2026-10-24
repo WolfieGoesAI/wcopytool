@@ -442,16 +442,7 @@ func addParityOdd(_ src: [Int], _ sourceLen: Int, _ pLen: Int) -> [Int] {
     }
     return dest
 }
-func manchesterEncode2Bytes(_ datain: UInt32) -> UInt32 {
-    var out: UInt32 = 0
-    for i in 0..<16 { let b = UInt32((datain >> UInt32(15 - i)) & 1); out |= (1 << UInt32(((15 - i) * 2) + Int(b))) }
-    return out
-}
-func crc8Maxim(_ buff: [UInt8]) -> UInt8 {       // CRC-8/MAXIM (poly reflected 0x8C, init 0)
-    var crc: UInt8 = 0
-    for b in buff { crc ^= b; for _ in 0..<8 { crc = (crc & 1) != 0 ? (crc >> 1) ^ 0x8C : (crc >> 1) } }
-    return crc
-}
+// (crc8Maxim and manchesterEncode2Bytes are defined above, shared with Paradox/FDX-B.)
 func dec2bcd(_ dec: UInt32) -> UInt32 { var d = dec, r: UInt32 = 0, s: UInt32 = 0; while d > 0 { r |= (d % 10) << s; d /= 10; s += 4 }; return r }
 
 // AWID 26/34/37-bit (FSK2a, RF/50) → three T5577 data blocks. 96-bit stream per Proxmark getAWIDBits:
