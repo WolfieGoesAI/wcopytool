@@ -498,35 +498,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
     var hidReadActive = false
     var hidReadRetries = 0
+    var hidReadLastRaw: UInt64? = nil   // previous sighting, for the two-matching-reads consistency check
     func readHID() {
         guard recPhase == .idle, !ulActive, !hidReadActive, !hidUlActive else { log("busy — another operation is running"); return }
-        hidReadActive = true; hidReadRetries = 0
+        hidReadActive = true; hidReadRetries = 0; hidReadLastRaw = nil
         log("Read HID…")
         sendPayload(lfRFConfig(freq: parseU32(idFreq.stringValue)), "RF config")
         afterDelay(0.25) { [weak self] in self?.sendPayload(hidReadCmd(), "read HID") }
     }
     func handleHIDRead(_ bytes: [UInt8]) {
         guard let (p, _, _, _) = Frame.parse(bytes) else { return }
+        // This device demodulates non-26/37-bit HID unreliably, so trust a result only when two
+        // consecutive reads return the SAME raw value; otherwise keep trying, then report it unstable.
         if let r = hidDecodeReply(p) {
-            if let fmt = r.fmt {
-                hidReadActive = false
-                selectHidFormat(fmt)
-                hidFC.stringValue = String(r.fc); hidCN.stringValue = String(r.cn); hidRefresh()
-                log(String(format: "✓ HID read: %@  FC=%u CN=%u  (raw %llX, %d-bit)%@", hidFmtName(fmt), r.fc, r.cn, r.raw, r.len, r.note))
-            } else {
-                hidReadActive = false   // card present but length not in the decode table — surface the raw bits
-                log(String(format: "? HID read: raw %llX, %d-bit — %@", r.raw, r.len, r.note))
+            if let last = hidReadLastRaw, last == r.raw {
+                hidReadActive = false; hidReadLastRaw = nil
+                if let fmt = r.fmt {
+                    selectHidFormat(fmt)
+                    hidFC.stringValue = String(r.fc); hidCN.stringValue = String(r.cn); hidRefresh()
+                    log(String(format: "✓ HID read: %@  FC=%u CN=%u  (raw %llX, %d-bit)%@", hidFmtName(fmt), r.fc, r.cn, r.raw, r.len, r.note))
+                } else {
+                    log(String(format: "? HID read: raw %llX, %d-bit — %@", r.raw, r.len, r.note))
+                }
+                return
             }
-        } else if hidReadRetries < 8 {
+            hidReadLastRaw = r.raw   // first sighting — read again to confirm
+        }
+        if hidReadRetries < 12 {
             hidReadRetries += 1
-            // Surface any non-empty reply that didn't decode (e.g. AWID/Paradox) so the raw bits are visible.
-            if p.contains(where: { $0 != 0 }) {
-                log("read reply (undecoded): " + p.map { String(format: "%02X", $0) }.joined(separator: " "))
-            }
-            afterDelay(0.2) { [weak self] in self?.sendPayload(hidReadCmd(), "read HID") }
+            afterDelay(0.16) { [weak self] in self?.sendPayload(hidReadCmd(), "read HID") }
         } else {
             hidReadActive = false
-            log("✗ HID read: no HID card detected.")
+            if let last = hidReadLastRaw {
+                log(String(format: "⚠︎ HID read unstable: reads disagreed (last raw %llX). This device demodulates non-26/37-bit HID formats unreliably — verify the written card on your reader.", last))
+            } else {
+                log("✗ HID read: no HID card detected.")
+            }
+            hidReadLastRaw = nil
         }
     }
 
