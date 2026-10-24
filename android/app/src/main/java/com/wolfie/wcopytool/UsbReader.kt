@@ -112,8 +112,10 @@ class UsbReader(private val mgr: UsbManager) {
         val setPwd = if (protect) Proto.fieldKey(pwd) else zero
         val curK = Proto.fieldKey(cur)
         val cfg = Proto.u32be(baseConfig or (if (protect) 0x10L else 0L))
+        // Authenticate block 7 only with the current-password field and 0 (strict — no known-key sweep).
+        // A card locked with a password not in the Unlock/Current field must be unlocked first.
         val b7 = ArrayList<IntArray>(); fun addB(k: IntArray) { if (b7.none { eq(it, k) }) b7.add(k) }
-        addB(curK); addB(zero); Proto.NORMALIZE.forEach { addB(Proto.keyBytes(it)) }
+        addB(curK); addB(zero)
         val d = ArrayList<IntArray>(); fun addD(k: IntArray) { if (d.none { eq(it, k) }) d.add(k) }
         addD(setPwd); addD(curK); addD(zero)
         log("write ${dataBlocks.size} blocks, config ${Proto.hexJoin(cfg)}")

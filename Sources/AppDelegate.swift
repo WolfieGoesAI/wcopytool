@@ -438,10 +438,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             : String(format: "FC=%u CN=%u", parseU32(hidFC.stringValue), parseU32(hidCN.stringValue))
         log("\(hidFmtName(fmt)) write \(ids) → \(data.count) data blocks, config \(hexJoin(cfg)) (current pwd \(hexJoin(cur)))")
         var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config")]
-        // Set the password (block 7) to the new value, authenticating with the current password, 0, and
-        // the known keys — so the change takes whether the card is blank or already protected.
+        // Set the password (block 7) to the new value, authenticating only with the current password and
+        // 0 (same strict rule as the 125 kHz write — no known-key sweep). A card locked with a password
+        // not in the Current card password field must be unlocked first.
         var b7cands: [[UInt8]] = [cur]; if !b7cands.contains([0,0,0,0]) { b7cands.append([0,0,0,0]) }
-        for k in kT5NormalizeKeys { let kb = keyBytes(k); if !b7cands.contains(where: { $0 == kb }) { b7cands.append(kb) } }
         for c in b7cands { seq.append((lfT5Write(addr: 7, word: setPwd, pwd: c, freq: freq), "block7 = new pwd (auth \(hexJoin(c)))")) }
         // Data blocks 1..N then config block 0.
         var blocks: [(UInt8, [UInt8], String)] = []
