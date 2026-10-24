@@ -83,6 +83,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Keep the screen awake while the app is in the foreground — writes/unlock sweeps can run long.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         usb = getSystemService(USB_SERVICE) as UsbManager
         reader = UsbReader(usb)
         val filter = IntentFilter(ACTION_PERM).apply {
