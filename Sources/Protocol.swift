@@ -315,14 +315,28 @@ enum HIDFormat: Int {
     case h10301 = 0, tecom27, w2804, atsw30, adt31, kastle,
          d10202, h10306, c1k35, c15001, s12906,
          h10302, h10304,
-         awid26, paradox, fdxbA0, fdxbA1
+         awid26, awid34, paradox, pyramid, ioprox, destron,
+         viking, visa2000, noralsy, presco,
+         fdxbA0, fdxbA1,
+         rawclone
 }
 
 // Base T5577 config (block 0) per format. The PWD bit (0x10) is OR'd in by the caller when protecting.
+// Field encoding (Proxmark protocols.h): modulation + bitrate + (maxblock << 5) [+ ST terminator 0x08].
+//   FSK2a=0x7000 FSK2=0x5000 MANCHESTER=0x8000 BIPHASE=0x10000 DIPHASE=0x18000
+//   RF/32=0x80000 RF/40=0xC0000 RF/50=0x100000 RF/64=0x140000
 func lfProxConfig(_ fmt: HIDFormat) -> UInt32 {
     switch fmt {
     case .fdxbA0, .fdxbA1: return 0x00098080    // DIPHASE, RF/32, 4 data blocks (128-bit FDX-B stream)
-    default:    return 0x00107060    // FSK2a, RF/50, 3 data blocks (HID / AWID / Paradox)
+    case .ioprox:   return 0x00147040           // FSK2a RF/64, 2 data blocks (64-bit)
+    case .pyramid:  return 0x00107080           // FSK2a RF/50, 4 data blocks (128-bit)
+    case .destron:  return 0x00105060           // FSK2  RF/50, 3 data blocks (96-bit, FDX-A)
+    case .viking:   return 0x00088040           // Manchester RF/32, 2 data blocks (64-bit)
+    case .visa2000: return 0x00148068           // Manchester RF/64 +ST, 3 data blocks (96-bit)
+    case .noralsy:  return 0x00088068           // Manchester RF/32 +ST, 3 data blocks (96-bit)
+    case .presco:   return 0x00088088           // Manchester RF/32 +ST, 4 data blocks (128-bit)
+    case .rawclone: return 0x00107060           // overridden by the raw-clone config the caller supplies
+    default:        return 0x00107060           // FSK2a RF/50, 3 data blocks (HID / AWID / Paradox)
     }
 }
 
@@ -402,43 +416,143 @@ func paradoxBlocks(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
     return out
 }
 
-// AWID 26-bit (FSK2a, RF/50) → three T5577 data blocks (blocks 1-3). Same T5577 config as HID
-// (0x00107060). Built per Proxmark getAWIDBits: 96-bit stream = 8-bit preamble 00000001, then
-// addParity(pre, groups of 3 + 1 odd-parity bit) over a 66-bit buffer that is
-//   [fmtlen=26 : 8 bits][Wiegand-26 (EP | 8-bit FC | 16-bit CN | OP) : 26 bits][zero pad : 32 bits].
-// SPEC-BASED, not yet capture-verified.
-func awid26Blocks(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
-    // 24 data bits: 8-bit FC then 16-bit CN
-    var data: [Int] = []
-    for i in stride(from: 7,  through: 0, by: -1) { data.append(Int((fc >> UInt32(i)) & 1)) }
-    for i in stride(from: 15, through: 0, by: -1) { data.append(Int((cn >> UInt32(i)) & 1)) }
-    let ep = data[0..<12].reduce(0, +) % 2                 // even parity over top 12
-    let op = (data[12..<24].reduce(0, +) + 1) % 2          // odd parity over bottom 12
-    let wiegand: [Int] = [ep] + data + [op]                // 26 bits
-    // 66-bit pre buffer: fmtlen(26) as 8 bits, then the 26-bit wiegand, then pad with zeros to 66
-    var pre: [Int] = []
-    for i in stride(from: 7, through: 0, by: -1) { pre.append((26 >> i) & 1) }
-    pre += wiegand
-    while pre.count < 66 { pre.append(0) }
-    // addParity: emit each group of 3 source bits followed by an odd-parity bit → 88 bits
-    var body: [Int] = []
-    var i = 0
-    while i < 66 {
-        let grp = Array(pre[i..<min(i + 3, 66)])
-        body += grp
-        body.append(grp.reduce(0, +) % 2 == 0 ? 1 : 0)     // odd parity of the group
-        i += 3
-    }
-    let bits: [Int] = [0,0,0,0,0,0,0,1] + body             // 8-bit preamble + 88 = 96
-    var out = [UInt32](repeating: 0, count: 3)
-    for (j, b) in bits.enumerated() { out[j/32] = (out[j/32] << 1) | UInt32(b) }
+// ---- bit helpers shared by the non-HID LF encoders (faithful ports of Proxmark) ----
+func bitsMSB(_ v: UInt64, _ n: Int) -> [Int] { (0..<n).map { Int((v >> UInt64(n - 1 - $0)) & 1) } }
+func packBlocks(_ bits: [Int], _ n: Int) -> [UInt32] {
+    var out = [UInt32](repeating: 0, count: n)
+    for (j, b) in bits.enumerated() where j / 32 < n { out[j/32] = (out[j/32] << 1) | UInt32(b) }
     return out
 }
-// Blocks 1-3 for any supported LF prox format.
+// Proxmark wiegand_add_parity: [EVEN over first half] + source + [ODD over second half].
+func wiegandAddParity(_ src: [Int]) -> [Int] {
+    let h = src.count / 2
+    let ep = src[0..<h].reduce(0, +) & 1                    // GetParity EVEN
+    let op = (src[h...].reduce(0, +) & 1) ^ 1               // GetParity ODD
+    return [ep] + src + [op]
+}
+// Proxmark addParity with pType=1: groups of (pLen-1) source bits, each followed by a parity bit
+// equal to the XOR of the group (reads out-of-range source bits as 0, like the C).
+func addParityOdd(_ src: [Int], _ sourceLen: Int, _ pLen: Int) -> [Int] {
+    var dest: [Int] = []; var word = 0
+    while word < sourceLen {
+        var wd = 0
+        for bit in 0..<(pLen - 1) { let i = word + bit; let s = i < src.count ? src[i] : 0; wd = (wd << 1) | s; dest.append(s) }
+        dest.append(wd.nonzeroBitCount & 1)
+        word += pLen - 1
+    }
+    return dest
+}
+func manchesterEncode2Bytes(_ datain: UInt32) -> UInt32 {
+    var out: UInt32 = 0
+    for i in 0..<16 { let b = UInt32((datain >> UInt32(15 - i)) & 1); out |= (1 << UInt32(((15 - i) * 2) + Int(b))) }
+    return out
+}
+func crc8Maxim(_ buff: [UInt8]) -> UInt8 {       // CRC-8/MAXIM (poly reflected 0x8C, init 0)
+    var crc: UInt8 = 0
+    for b in buff { crc ^= b; for _ in 0..<8 { crc = (crc & 1) != 0 ? (crc >> 1) ^ 0x8C : (crc >> 1) } }
+    return crc
+}
+func dec2bcd(_ dec: UInt32) -> UInt32 { var d = dec, r: UInt32 = 0, s: UInt32 = 0; while d > 0 { r |= (d % 10) << s; d /= 10; s += 4 }; return r }
+
+// AWID 26/34/37-bit (FSK2a, RF/50) → three T5577 data blocks. 96-bit stream per Proxmark getAWIDBits:
+// 8-bit preamble 00000001, then addParity (groups of 3 + XOR parity) over a 66-bit buffer:
+//   [fmtlen : 8][Wiegand (EP | FC | CN | OP)][zero pad]. WRITE-ONLY (this device can't read AWID back).
+func awidBlocks(_ fmtlen: Int, _ fc: UInt32, _ cn: UInt32) -> [UInt32] {
+    let data: [Int]
+    switch fmtlen {
+    case 34: data = bitsMSB(UInt64(fc), 8) + bitsMSB(UInt64(cn), 24)
+    default: data = bitsMSB(UInt64(fc), 8) + bitsMSB(UInt64(cn), 16)   // 26
+    }
+    var pre = bitsMSB(UInt64(fmtlen), 8) + wiegandAddParity(data)
+    while pre.count < 66 { pre.append(0) }
+    let body = addParityOdd(pre, 66, 4)                    // 88 bits
+    return packBlocks([0,0,0,0,0,0,0,1] + body, 3)
+}
+// ioProx (FSK2a RF/64) → two data blocks (64-bit), per Proxmark getIOProxBits. version defaults to 1.
+func ioproxBlocks(_ version: UInt32, _ fc: UInt32, _ cn: UInt32) -> [UInt32] {
+    var pre = [Int](repeating: 0, count: 64); let SEP = 1; var pos = 9
+    func put(_ v: UInt32, _ n: Int) { for (i, b) in bitsMSB(UInt64(v), n).enumerated() { pre[pos + i] = b }; pos += n }
+    put(0xF0, 8); pre[pos] = SEP; pos += 1
+    put(fc & 0xFF, 8); pre[pos] = SEP; pos += 1
+    put(version & 0xFF, 8); pre[pos] = SEP; pos += 1
+    put((cn >> 8) & 0xFF, 8); pre[pos] = SEP; pos += 1
+    put(cn & 0xFF, 8); pre[pos] = SEP; pos += 1
+    var crc: UInt32 = 0
+    for i in 1..<6 { var byte: UInt32 = 0; for k in 0..<8 { byte = (byte << 1) | UInt32(pre[9 * i + k]) }; crc += byte }
+    crc = (0xFF - (crc & 0xFF)) & 0xFF
+    put(crc, 8); pre[pos] = SEP; pre[pos + 1] = SEP
+    return packBlocks(pre, 2)
+}
+// Pyramid / Farpointe (FSK2a RF/50) → four data blocks (128-bit), per Proxmark getPyramidBits.
+func pyramidBlocks(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
+    var pre = [Int](repeating: 0, count: 128); pre[79] = 1
+    let wp = wiegandAddParity(bitsMSB(UInt64(fc), 8) + bitsMSB(UInt64(cn), 16))   // 26 bits
+    for (i, b) in wp.enumerated() { pre[80 + i] = b }
+    let body = addParityOdd(Array(pre[8...]), 102, 8)      // 120 bits
+    var out = [Int](repeating: 0, count: 128)
+    for (i, b) in body.enumerated() { out[8 + i] = b }
+    var csBuff = [UInt8]()
+    for i in 0..<13 { var byte: UInt8 = 0; for k in 0..<8 { byte = (byte << 1) | UInt8(out[16 + i * 8 + k]) }; csBuff.append(byte) }
+    for (i, b) in bitsMSB(UInt64(crc8Maxim(csBuff)), 8).enumerated() { out[120 + i] = b }
+    return packBlocks(out, 4)
+}
+// Destron / FDX-A FECAVA (FSK2 RF/50) → three data blocks (96-bit), per Proxmark. uid: up to 5 bytes.
+func destronBlocks(_ uid: [UInt8]) -> [UInt32] {
+    var dataEx = [UInt8](repeating: 0, count: 12 + 24)
+    let n = min(uid.count, 5)
+    for i in 0..<n { let op = UInt8(bitsMSB(UInt64(uid[i]), 8).reduce(0, +) & 1); dataEx[i + 1] = ~(uid[i] | (op << 7)) }
+    var blk = [UInt32](repeating: 0, count: 4)
+    for i in 0..<3 { blk[i + 1] = manchesterEncode2Bytes((UInt32(dataEx[i * 2]) << 8) + UInt32(dataEx[i * 2 + 1])) }
+    blk[1] = (blk[1] & 0xFFFF) | 0xAAE20000
+    return [blk[1], blk[2], blk[3]]
+}
+// Viking (Manchester RF/32) → two data blocks (64-bit): 0xF2 preamble, 32-bit id, XOR checksum.
+func vikingBlocks(_ id: UInt32) -> [UInt32] {
+    let chk = ((id >> 24) & 0xFF) ^ ((id >> 16) & 0xFF) ^ ((id >> 8) & 0xFF) ^ (id & 0xFF) ^ 0xF2 ^ 0xA8
+    let raw = (UInt64(0xF2) << 56) | (UInt64(id) << 8) | UInt64(chk)
+    return [UInt32((raw >> 32) & 0xFFFFFFFF), UInt32(raw & 0xFFFFFFFF)]
+}
+// Visa2000 (Manchester RF/64 +ST) → three data blocks (96-bit), per Proxmark.
+func visa2000Blocks(_ id: UInt32) -> [UInt32] {
+    func chksum(_ v: UInt32) -> UInt32 { var s: UInt32 = 0; var i: UInt32 = 0; while i < 32 { s ^= (v >> i) & 0xF; i += 4 }; return s & 0xF }
+    let lut: [UInt32] = [0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0]
+    var par: UInt32 = 0; for k in 0..<8 { par |= lut[Int((id >> UInt32(28 - 4 * k)) & 0xF)] << UInt32(7 - k) }
+    return [0x56495332, id, (par << 4) | chksum(id)]
+}
+// Noralsy (Manchester RF/32 +ST) → three data blocks (96-bit), per Proxmark getnoralsyBits.
+func noralsyBlocks(_ id: UInt32, _ year: UInt32) -> [UInt32] {
+    func ck(_ bits: [Int], _ len: Int) -> UInt32 { var s: UInt32 = 0; var i = 0; while i < len { var nib: UInt32 = 0; for k in 0..<4 { nib = (nib << 1) | UInt32(bits[i + k]) }; s ^= nib; i += 4 }; return s & 0xF }
+    var bits = [Int](repeating: 0, count: 96)
+    for (i, b) in bitsMSB(0xBB0214FF, 32).enumerated() { bits[i] = b }
+    let idb = dec2bcd(id); let yb = dec2bcd(year) & 0xFF
+    let sub1 = (idb & 0xFFF0000) >> 16, sub2 = (idb & 0x000FF00) >> 8, sub3 = idb & 0xFF
+    for (i, b) in bitsMSB(UInt64(sub1), 12).enumerated() { bits[32 + i] = b }
+    for (i, b) in bitsMSB(UInt64(yb), 8).enumerated()   { bits[44 + i] = b }
+    for (i, b) in bitsMSB(UInt64(sub2), 8).enumerated() { bits[56 + i] = b }
+    for (i, b) in bitsMSB(UInt64(sub3), 8).enumerated() { bits[64 + i] = b }
+    for (i, b) in bitsMSB(UInt64(ck(Array(bits[32...]), 40)), 4).enumerated() { bits[72 + i] = b }
+    for (i, b) in bitsMSB(UInt64(ck(bits, 76)), 4).enumerated() { bits[76 + i] = b }
+    return packBlocks(bits, 3)
+}
+// Presco (Manchester RF/32 +ST) → four data blocks (128-bit): 0x10D00000 preamble, 2×0, then fullcode.
+// fullcode = (site<<24) | user, built from FC (8-bit site) and CN (16-bit user).
+func prescoBlocks(_ fc: UInt32, _ cn: UInt32) -> [UInt32] {
+    let fullcode = ((fc & 0xFF) << 24) | (cn & 0xFFFF)
+    return [0x10D00000, 0, 0, fullcode]
+}
+
+// Blocks for any supported LF prox format (FC/CN taken from the UI fields).
 func lfProxBlocks(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> [UInt32] {
     switch fmt {
-    case .awid26:  return awid26Blocks(fc, cn)
+    case .awid26:  return awidBlocks(26, fc, cn)
+    case .awid34:  return awidBlocks(34, fc, cn)
     case .paradox: return paradoxBlocks(fc, cn)
+    case .pyramid: return pyramidBlocks(fc, cn)
+    case .ioprox:  return ioproxBlocks(1, fc, cn)          // version fixed at 1 (most common)
+    case .viking:  return vikingBlocks(cn)                 // single 32-bit card id (CN field; FC ignored)
+    case .visa2000: return visa2000Blocks(cn)
+    case .noralsy: return noralsyBlocks(cn, 2000)
+    case .presco:  return prescoBlocks(fc, cn)
     default:       return hidT5BlocksV(hidValue(fmt, fc, cn))
     }
 }
@@ -546,7 +660,9 @@ func hidValue(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> UInt64 {
     case .kastle: return hidKastle(fc, cn)
     case .c15001: return hidC15001(fc, cn)
     case .s12906: return hidS12906(fc, cn)
-    case .h10302, .awid26, .paradox, .fdxbA0, .fdxbA1: return 0  // built by their own block builders, not this path
+    case .h10302, .awid26, .awid34, .paradox, .pyramid, .ioprox, .destron,
+         .viking, .visa2000, .noralsy, .presco, .fdxbA0, .fdxbA1, .rawclone:
+        return 0  // built by their own block builders, not this path
     }
 }
 

@@ -69,6 +69,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     let ulByteRev = NSButton(checkboxWithTitle: "byte-reversed", target: nil, action: nil)
     let hidBitRev = NSButton(checkboxWithTitle: "bit-reversed", target: nil, action: nil)
     let hidByteRev = NSButton(checkboxWithTitle: "byte-reversed", target: nil, action: nil)
+    let rawHex = NSTextField(string: "")                 // raw-clone: block data hex (any length ×4 bytes)
+    let rawModPop = NSPopUpButton()                      // raw-clone: modulation preset
+    var lastRawRead: UInt64? = nil                       // last value the reader returned (for raw clone)
     let rawPayload = NSTextField(string: "FF 00 9A 5A A5 54 69 61 6E")
     let rawFrame = NSTextField(string: "01 0F 00 00 FF 00 9A 5A A5 54 69 61 6E")
     var regFields: [UInt8: NSTextField] = [:]
@@ -363,25 +366,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func pageHID() -> NSView {
         hidFC.target = self; hidFC.action = #selector(hidEdited)
         hidCN.target = self; hidCN.action = #selector(hidEdited)
-        // Build the format menu with separator lines between the HID group and AWID, and between
-        // Paradox and FDX-B. nil = separator. The format is carried on each item's representedObject so
-        // the separators don't shift any index-based mapping.
-        let fmtOrder: [HIDFormat?] = [
-            .h10301, .tecom27, .w2804, .atsw30, .adt31, .kastle,
-            .d10202, .h10306, .c1k35, .c15001, .s12906,
-            .h10302, .h10304,
-            nil, .awid26, .paradox, nil, .fdxbA0, .fdxbA1]
+        // Build the format menu grouped by modulation, with a greyed (disabled) header per category and
+        // a separator between groups. Formats whose round-trip the device can't read back are write-only.
+        // Each entry carries its format on representedObject, so headers/separators shift no index mapping.
+        enum MenuRow { case header(String); case sep; case fmt(HIDFormat) }
+        let fmtOrder: [MenuRow] = [
+            .header("HID Prox (FSK) — read + write"),
+            .fmt(.h10301), .fmt(.tecom27), .fmt(.w2804), .fmt(.atsw30), .fmt(.adt31), .fmt(.kastle),
+            .fmt(.d10202), .fmt(.h10306), .fmt(.c1k35), .fmt(.c15001), .fmt(.s12906),
+            .fmt(.h10302), .fmt(.h10304),
+            .sep, .header("Other FSK — write-only"),
+            .fmt(.awid26), .fmt(.awid34), .fmt(.paradox), .fmt(.pyramid), .fmt(.ioprox), .fmt(.destron),
+            .sep, .header("ASK / Manchester — write-only"),
+            .fmt(.viking), .fmt(.visa2000), .fmt(.noralsy), .fmt(.presco),
+            .sep, .header("Animal (DIPHASE) — write-only"),
+            .fmt(.fdxbA0), .fmt(.fdxbA1),
+            .sep, .header("Raw / clone"),
+            .fmt(.rawclone)]
         let fmtMenu = NSMenu()
-        for f in fmtOrder {
-            if let f = f {
-                let it = NSMenuItem(title: hidFmtName(f), action: nil, keyEquivalent: "")
+        for r in fmtOrder {
+            switch r {
+            case .sep: fmtMenu.addItem(.separator())
+            case .header(let s):
+                let it = NSMenuItem(title: s, action: nil, keyEquivalent: ""); it.isEnabled = false
+                it.attributedTitle = NSAttributedString(string: s, attributes: [
+                    .font: NSFont.boldSystemFont(ofSize: 10), .foregroundColor: NSColor.secondaryLabelColor])
+                fmtMenu.addItem(it)
+            case .fmt(let f):
+                let it = NSMenuItem(title: "   " + hidFmtName(f), action: nil, keyEquivalent: "")
                 it.representedObject = f.rawValue
                 fmtMenu.addItem(it)
-            } else {
-                fmtMenu.addItem(.separator())
             }
         }
         hidFmtPop.menu = fmtMenu
+        hidFmtPop.autoenablesItems = false
         selectHidFormat(.h10301)
         hidFmtPop.target = self; hidFmtPop.action = #selector(hidEdited)
         let row = hstack([labeled("Format:", hidFmtPop),
@@ -392,10 +410,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                           ActionButton("Unlock HID") { [weak self] in self?.startHIDUnlock() }])
         let protRow = hstack([hidProtect, field(hidPwd, 100),
                               labeled("Current card password:", field(hidUnlock, 100))])
+        // Raw clone: write arbitrary T5577 blocks the user supplies (e.g. a 12-byte frame from another
+        // tool for Securakey/Gallagher), or clone an unknown card the reader could read but not decode.
+        if rawModPop.numberOfItems == 0 {
+            rawModPop.addItems(withTitles: ["FSK2a RF/50", "FSK2a RF/64", "FSK2 RF/50",
+                                            "Manchester RF/32", "Manchester RF/32 +ST",
+                                            "Manchester RF/40", "Manchester RF/64 +ST",
+                                            "Biphase RF/32", "Biphase RF/50"])
+        }
+        rawHex.placeholderString = "block data hex, e.g. 2004F66073 6073…"
+        let rawRow = hstack([labeled("Raw blocks:", field(rawHex, 260)), labeled("Modulation:", rawModPop),
+                             ActionButton("Use last read") { [weak self] in self?.fillRawFromLastRead() }])
         hidInfo.font = mono(10); hidInfo.textColor = .secondaryLabelColor; hidInfo.preferredMaxLayoutWidth = 900
         hidRefresh()
         let revRow = hstack([NSTextField(labelWithString: "Unlock HID also try:"), hidBitRev, hidByteRev])
-        return vstack([row, protRow, revRow, hidInfo])
+        return vstack([row, protRow, rawRow, revRow, hidInfo])
     }
     @objc func hidEdited() { hidRefresh() }
     func hidFormat() -> HIDFormat {
@@ -411,7 +440,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let fc = parseU32(hidFC.stringValue)
         if fmt == .fdxbA0 || fmt == .fdxbA1 { return fdxbBlocks(country: fc, national: parseU40(hidCN.stringValue), animal: fmt == .fdxbA1) }
         if fmt == .h10302 { return hidT5BlocksV(hidH10302(parseU40(hidCN.stringValue) & 0x7FFFFFFFF)) }  // 35-bit CN
+        if fmt == .destron { return destronBlocks(hexBytes(hidCN.stringValue, max: 5)) }   // UID hex (CN field)
+        if fmt == .rawclone { return rawBlocks() }
         return lfProxBlocks(fmt, fc, parseU32(hidCN.stringValue))
+    }
+    // Raw-clone: parse the hex field into big-endian 32-bit blocks (any length, padded to a 4-byte boundary).
+    func rawBlocks() -> [UInt32] {
+        let bytes = hexBytes(rawHex.stringValue, max: 64)
+        var out = [UInt32](); var i = 0
+        while i < bytes.count { var w: UInt32 = 0; for k in 0..<4 { w = (w << 8) | UInt32(i + k < bytes.count ? bytes[i + k] : 0) }; out.append(w); i += 4 }
+        return out
+    }
+    // Raw-clone config word = modulation preset | (number-of-blocks << 5) [| ST terminator].
+    func rawConfig() -> UInt32 {
+        let n = UInt32(max(rawBlocks().count, 1))
+        let base: UInt32, st: UInt32
+        switch rawModPop.indexOfSelectedItem {
+        case 1: base = 0x00147000; st = 0            // FSK2a RF/64
+        case 2: base = 0x00105000; st = 0            // FSK2  RF/50
+        case 3: base = 0x00088000; st = 0            // Manchester RF/32
+        case 4: base = 0x00088000; st = 0x08         // Manchester RF/32 +ST
+        case 5: base = 0x000C8000; st = 0            // Manchester RF/40
+        case 6: base = 0x00148000; st = 0x08         // Manchester RF/64 +ST
+        case 7: base = 0x00090000; st = 0            // Biphase RF/32
+        case 8: base = 0x00110000; st = 0            // Biphase RF/50
+        default: base = 0x00107000; st = 0           // FSK2a RF/50
+        }
+        return base | (n << 5) | st
+    }
+    // Parse a hex string (spaces allowed) into bytes, capped at `max`.
+    func hexBytes(_ s: String, max: Int) -> [UInt8] {
+        let h = s.replacingOccurrences(of: "0x", with: "").filter { $0.isHexDigit }
+        var out = [UInt8](); var i = h.startIndex
+        while i < h.endIndex && out.count < max {
+            let j = h.index(i, offsetBy: 2, limitedBy: h.endIndex) ?? h.endIndex
+            if let b = UInt8(h[i..<j], radix: 16) { out.append(b) }
+            i = j
+        }
+        return out
+    }
+    // Fill the raw-clone field from the last value the reader returned, framed the way the device reads it
+    // back (FSK2a RF/50 HID framing), so an unknown-but-readable card can be cloned verbatim.
+    func fillRawFromLastRead() {
+        guard let v = lastRawRead else { log("No previous read to clone — read a card first."); return }
+        let blocks = hidT5BlocksV(v)
+        rawHex.stringValue = blocks.map { String(format: "%08X", $0) }.joined(separator: " ")
+        rawModPop.selectItem(at: 0)   // FSK2a RF/50
+        selectHidFormat(.rawclone); hidRefresh()
+        log(String(format: "Raw clone loaded from last read: %010llX → %@", v, rawHex.stringValue))
     }
     func hidFmtName(_ fmt: HIDFormat) -> String {
         switch fmt {
@@ -429,25 +505,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         case .h10302: return "HID 37-bit (H10302, no FC)"
         case .h10304: return "HID 37-bit (H10304)"
         case .awid26: return "AWID 26-bit"
+        case .awid34: return "AWID 34-bit"
         case .paradox: return "Paradox"
+        case .pyramid: return "Pyramid (Farpointe)"
+        case .ioprox: return "ioProx (Kantech)"
+        case .destron: return "FDX-A / Destron (animal)"
+        case .viking: return "Viking"
+        case .visa2000: return "Visa2000"
+        case .noralsy: return "Noralsy"
+        case .presco: return "Presco"
         case .fdxbA0: return "FDX-B (Animal flag 0)"
         case .fdxbA1: return "FDX-B (Animal flag 1)"
+        case .rawclone: return "Raw clone (paste blocks)"
         }
     }
     func hidRefresh() {
         let fmt = hidFormat()
         let b = lfBlocksFor(fmt)
-        let cfg = lfProxConfig(fmt)
-        let ids: String
-        if fmt == .fdxbA0 || fmt == .fdxbA1 {
-            ids = String(format: "Country %u, National %llu, Animal %d", parseU32(hidFC.stringValue), parseU40(hidCN.stringValue), fmt == .fdxbA1 ? 1 : 0)
-        } else if fmt == .h10302 {
-            ids = String(format: "CN %llu", parseU40(hidCN.stringValue) & 0x7FFFFFFFF)   // 35-bit, no FC
-        } else {
-            ids = String(format: "FC %u, CN %u", parseU32(hidFC.stringValue), parseU32(hidCN.stringValue))
-        }
+        let cfg = cfgFor(fmt)
         let blkStr = b.enumerated().map { String(format: "blk%d %08X", $0.offset + 1, $0.element) }.joined(separator: "  ")
-        hidInfo.stringValue = String(format: "%@   (%@)\nT55x7 cfg  : %08X   %@", hidFmtName(fmt), ids, cfg, blkStr)
+        hidInfo.stringValue = String(format: "%@   (%@)\nT55x7 cfg  : %08X   %@", hidFmtName(fmt), idsFor(fmt), cfg, blkStr)
+    }
+    // Config word for a format (raw-clone takes its config from the modulation preset).
+    func cfgFor(_ fmt: HIDFormat) -> UInt32 { fmt == .rawclone ? rawConfig() : lfProxConfig(fmt) }
+    // Human-readable id summary for logs / the breakdown line.
+    func idsFor(_ fmt: HIDFormat) -> String {
+        switch fmt {
+        case .fdxbA0, .fdxbA1:
+            return String(format: "Country %u, National %llu, Animal %d", parseU32(hidFC.stringValue), parseU40(hidCN.stringValue), fmt == .fdxbA1 ? 1 : 0)
+        case .h10302:
+            return String(format: "CN %llu", parseU40(hidCN.stringValue) & 0x7FFFFFFFF)
+        case .viking, .visa2000, .noralsy:
+            return String(format: "ID %u", parseU32(hidCN.stringValue))               // single 32-bit id (CN field)
+        case .destron:
+            return "UID " + hexBytes(hidCN.stringValue, max: 5).map { String(format: "%02X", $0) }.joined()
+        case .rawclone:
+            return "raw " + (rawHex.stringValue.isEmpty ? "(empty)" : rawHex.stringValue)
+        default:
+            return String(format: "FC %u, CN %u", parseU32(hidFC.stringValue), parseU32(hidCN.stringValue))
+        }
     }
     func writeHID() {
         guard recPhase == .idle, !ulActive, !hidReadActive, !hidUlActive else { log("busy — another operation is running"); return }
@@ -458,11 +554,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let setPwd = protect ? fieldKey(hidPwd.stringValue) : [0,0,0,0]
         // The card's CURRENT password — needed to re-write or unprotect a card that already has one.
         let cur = fieldKey(hidUnlock.stringValue)
-        let cfg = u32be(lfProxConfig(fmt) | (protect ? 0x10 : 0))   // PWD bit 0x10 when protecting
-        let ids = (fmt == .fdxbA0 || fmt == .fdxbA1)
-            ? String(format: "Country=%u National=%llu Animal=%d", parseU32(hidFC.stringValue), parseU40(hidCN.stringValue), fmt == .fdxbA1 ? 1 : 0)
-            : String(format: "FC=%u CN=%u", parseU32(hidFC.stringValue), parseU32(hidCN.stringValue))
-        log("\(hidFmtName(fmt)) write \(ids) → \(data.count) data blocks, config \(hexJoin(cfg)) (current pwd \(hexJoin(cur)))")
+        let cfg = u32be(cfgFor(fmt) | (protect ? 0x10 : 0))   // PWD bit 0x10 when protecting
+        log("\(hidFmtName(fmt)) write \(idsFor(fmt)) → \(data.count) data blocks, config \(hexJoin(cfg)) (current pwd \(hexJoin(cur)))")
         var seq: [([UInt8], String)] = [(lfRFConfig(freq: freq), "RF config")]
         // Set the password (block 7) to the new value, authenticating only with the current password and
         // 0 (same strict rule as the 125 kHz write — no known-key sweep). A card locked with a password
@@ -503,12 +596,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         if let r = hidDecodeReply(p) {
             if let last = hidReadLastRaw, last == r.raw {
                 hidReadActive = false; hidReadLastRaw = nil
+                lastRawRead = r.raw   // remember for Raw clone ("Use last read")
                 if let fmt = r.fmt {
                     selectHidFormat(fmt)
                     hidFC.stringValue = String(r.fc); hidCN.stringValue = String(r.cn); hidRefresh()
                     log(String(format: "✓ HID read: %@  FC=%u CN=%u  (raw %llX, %d-bit)%@", hidFmtName(fmt), r.fc, r.cn, r.raw, r.len, r.note))
                 } else {
-                    log(String(format: "? HID read: raw %llX, %d-bit — %@", r.raw, r.len, r.note))
+                    log(String(format: "? HID read: raw %llX, %d-bit — %@ — use \u{201C}Raw clone → Use last read\u{201D} to clone it verbatim", r.raw, r.len, r.note))
                 }
                 return
             }
