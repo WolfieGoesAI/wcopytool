@@ -109,7 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         window.center()
         let content = NSView(frame: rect); window.contentView = content
 
-        statusField.textColor = .systemRed
+        statusField.textColor = .secondaryLabelColor
         statusField.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(statusField)   // anchored at the BOTTOM, below the log (constraints below)
 
@@ -174,8 +174,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             logScroll.bottomAnchor.constraint(equalTo: statusField.topAnchor, constant: -8),
             logScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 90),
 
-            // green status line at the very bottom, below the log window
-            statusField.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 12),
+            // status line at the very bottom, below the log window; leading nudged right to line up
+            // with the log's text (which has border + container inset + line-fragment padding)
+            statusField.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 20),
             statusField.trailingAnchor.constraint(equalTo: g.trailingAnchor, constant: -12),
             statusField.bottomAnchor.constraint(equalTo: g.bottomAnchor, constant: -10),
         ])
@@ -277,21 +278,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         // Confirmed LF read: FF 00 65 05 1E <freq> 00 00 00 00 → reply 02 0C 01 00 05 <5-byte EM id> CHK FD
         // Frequency is fixed at 125 kHz — every LF command in the original app uses it, and EM4100 /
         // T5577 are 125 kHz chips. (idFreq stays at 125000 internally.)
-        let readRow = hstack([ActionButton("Read ID (EM4100)") { [weak self] in
-                                  guard let s = self else { return }
-                                  s.sendPayload(lfRead(freq: parseU32(s.idFreq.stringValue)), "LF read EM4100") }])
         // Card # with a format selector (how the field is read and displayed).
         if idFormat.numberOfItems == 0 {
-            idFormat.addItems(withTitles: ["Decimal", "Hex (40-bit)", "DEZ 8", "DEZ 5.5", "Wiegand 26"])
+            idFormat.addItems(withTitles: ["Decimal", "Hex (40-bit)", "DEZ 8", "DEZ 5.5"])
             idFormat.target = self; idFormat.action = #selector(idFormatChanged)
             lfWriteId.target = self; lfWriteId.action = #selector(cardIdEdited)
         }
-        // Write — rewrites all LF chip types (T5577 + EM4305) the way the original app does.
+        // Write T5577 / EM4305, plus Read ID (EM4100) in the row.
         let writeRow = hstack([labeled("Card #:", field(lfWriteId, 130)), labeled("as", idFormat),
                                ActionButton("Write T5577") { [weak self] in self?.writeEM(false) },
                                ActionButton("Write EM4305") { [weak self] in self?.writeEM(true) },
-                               ActionButton("Write all LF") { [weak self] in guard let s = self else { return }
-                                   s.writeLFAll(id: s.currentCardId()) }])
+                               ActionButton("Read ID") { [weak self] in
+                                   guard let s = self else { return }
+                                   s.sendPayload(lfRead(freq: parseU32(s.idFreq.stringValue)), "LF read EM4100") }])
         // All formats of the current id (Proxmark-style).
         lfFormats.font = mono(10); lfFormats.textColor = .secondaryLabelColor; lfFormats.preferredMaxLayoutWidth = 900
         refreshFormats(currentCardId())
@@ -305,7 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             labeled("EM4305 Unlock Password:", field(lfEMFound, 100)),
             ActionButton("Unlock EM4305") { [weak self] in self?.unlockCard(true) }])
         let revRow = hstack([NSTextField(labelWithString: "Also try:"), ulBitRev, ulByteRev])
-        return vstack([readRow, writeRow, lfFormats, protectRow, foundRow, revRow])
+        return vstack([writeRow, lfFormats, protectRow, foundRow, revRow])
     }
 
     // ---- Card-number formats (EM4100 / Proxmark style) ----
@@ -349,10 +348,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func currentCardId() -> UInt64 { parseCardId(lfWriteId.stringValue, cardFmt) }
     func setCardId(_ id: UInt64) { lfWriteId.stringValue = formatCardId(id, cardFmt); refreshFormats(id) }
     func refreshFormats(_ id: UInt64) {
-        let fc = (id >> 17) & 0xFF, cn = (id >> 1) & 0xFFFF
         lfFormats.stringValue = String(format:
-            "Hex (40-bit) : %010llX      Decimal : %llu\nDEZ 10 : %010llu   DEZ 8 : %08llu   DEZ 5.5 : %05llu.%05llu\nWiegand 26 : FC %llu  CN %llu",
-            id, id & 0xFF_FFFF_FFFF, id & 0xFFFFFFFF, id & 0xFFFFFF, (id >> 16) & 0xFFFF, id & 0xFFFF, fc, cn)
+            "Hex (40-bit) : %010llX      Decimal : %llu\nDEZ 10 : %010llu   DEZ 8 : %08llu   DEZ 5.5 : %05llu.%05llu",
+            id, id & 0xFF_FFFF_FFFF, id & 0xFFFFFFFF, id & 0xFFFFFF, (id >> 16) & 0xFFFF, id & 0xFFFF)
     }
     @objc func cardIdEdited() { refreshFormats(currentCardId()) }
     @objc func idFormatChanged() {
@@ -1191,10 +1189,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             self.idBase = c.count >= 2 ? "\(c[0]) \(c[1])" : (c.first ?? label)
             self.idFallback = label
             self.statusField.stringValue = "\(self.idBase) …"
-            self.statusField.textColor = .systemGreen
+            self.statusField.textColor = .secondaryLabelColor
             self.startIdentityQuery()
         }
-        hid.onDisconnect = { [weak self] in self?.statusField.stringValue = "Not connected"; self?.statusField.textColor = .systemRed }
+        hid.onDisconnect = { [weak self] in self?.statusField.stringValue = "Not connected"; self?.statusField.textColor = .secondaryLabelColor }
         hid.onReport = { [weak self] bytes in self?.gotReport(bytes) }
     }
 
@@ -1230,7 +1228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         if let i = idInfo, !i.isEmpty { parts.append(i) }
         parts.append((idSerial?.isEmpty == false) ? idSerial! : "-")
         statusField.stringValue = parts.joined(separator: " - ")
-        statusField.textColor = .systemGreen
+        statusField.textColor = .secondaryLabelColor
     }
     @objc func rescan() { hid.stop(); if !hid.start() { log("restart failed") } }
 
