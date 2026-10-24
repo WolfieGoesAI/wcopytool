@@ -312,9 +312,9 @@ let kT5HIDConfigWire: [UInt8] = [0x00,0x10,0x70,0x60]
 // LF prox formats this app can write. HID 26/37 are capture-verified; AWID 26 is spec-based
 // (Proxmark getAWIDBits) and WRITE-ONLY (this reader can't read AWID back) — verify on another reader.
 enum HIDFormat: Int {
-    case h10301 = 0, tecom27, w2804, atsw30, adt31, hcp32, hpp32, wie32, kastle,
-         d10202, h10306, n10002, smp34, bqt34, c1k35, c15001, s12906, sie36,
-         h10302, h10304, h10320, hgen37, mdi37,
+    case h10301 = 0, tecom27, w2804, atsw30, adt31, kastle,
+         d10202, h10306, c1k35, c15001, s12906,
+         h10302, h10304,
          awid26, paradox, fdxbA0, fdxbA1
 }
 
@@ -518,54 +518,15 @@ func hid2804W(_ fc: UInt32, _ cn: UInt32) -> UInt64 {
 func hidATSW30(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(30); w.set(UInt64(fc), 1, 12); w.set(UInt64(cn), 13, 16); w.bit(evp(w.get(1, 12)), 0); w.bit(odp(w.get(13, 16)), 29); return w.raw() }
 // HID ADT 31-bit: FC 4, CN 23, no parity.
 func hidADT31(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(31); w.set(UInt64(fc), 1, 4); w.set(UInt64(cn), 5, 23); return w.raw() }
-// HID Check Point 32-bit: CN 24 only, no parity.
-func hidHCP32(_ cn: UInt32) -> UInt64 { var w = Wp(32); w.set(UInt64(cn), 1, 24); return w.raw() }
-// HID Hewlett-Packard 32-bit: FC 12, CN (width 29 nominal, clipped to 19 within the frame), no parity.
-func hidHPP32(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(32); w.set(UInt64(fc), 1, 12); w.set(UInt64(cn), 13, 29); return w.raw() }
-// Wiegand 32-bit: FC 12, CN 16, no parity.
-func hidWIE32(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(32); w.set(UInt64(fc), 4, 12); w.set(UInt64(cn), 16, 16); return w.raw() }
 // Kastle 32-bit: always-1 bit, issue level (0), FC 8, CN 16, parity.
 func hidKastle(_ fc: UInt32, _ cn: UInt32) -> UInt64 {
     var w = Wp(32); w.bit(1, 1); w.set(0, 2, 5); w.set(UInt64(fc), 7, 8); w.set(UInt64(cn), 15, 16)
     w.bit(evp(w.get(1, 16)), 0); w.bit(odp(w.get(14, 17)), 31); return w.raw()
 }
-// Honeywell/Northern N10002 34-bit: FC 16, CN 16, parity.
-func hidN10002(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(34); w.set(UInt64(fc), 1, 16); w.set(UInt64(cn), 17, 16); w.bit(evp(w.get(1, 16)), 0); w.bit(odp(w.get(17, 16)), 33); return w.raw() }
-// Cardkey Smartpass 34-bit: FC 13, issue level (0), CN 16, no parity.
-func hidSMP34(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(34); w.set(UInt64(fc), 1, 13); w.set(0, 14, 3); w.set(UInt64(cn), 17, 16); return w.raw() }
-// BQT 34-bit: FC 8, CN 24, parity.
-func hidBQT34(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(34); w.set(UInt64(fc), 1, 8); w.set(UInt64(cn), 9, 24); w.bit(evp(w.get(1, 16)), 0); w.bit(odp(w.get(17, 16)), 33); return w.raw() }
 // HID KeyScan C15001 36-bit: OEM (900), FC 8, CN 16, parity.
 func hidC15001(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(36); w.set(900, 1, 10); w.set(UInt64(fc), 11, 8); w.set(UInt64(cn), 19, 16); w.bit(evp(w.get(1, 17)), 0); w.bit(odp(w.get(18, 17)), 35); return w.raw() }
 // HID Simplex S12906 36-bit: FC 8, issue level (0), CN 24, parity.
 func hidS12906(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(36); w.set(UInt64(fc), 1, 8); w.set(0, 9, 2); w.set(UInt64(cn), 11, 24); w.bit(odp(w.get(1, 17)), 0); w.bit(odp(w.get(17, 18)), 35); return w.raw() }
-// HID Siemens 36-bit: FC 18, CN 16, nonlinear parity.
-func hidSie36(_ fc: UInt32, _ cn: UInt32) -> UInt64 {
-    var w = Wp(36); w.set(UInt64(fc), 1, 18); w.set(UInt64(cn), 19, 16)
-    w.bit(odp(w.getNL([1,3,4,6,7,9,10,12,13,15,16,18,19,21,22,24,25,27,28,30,31,33,34])), 0)
-    w.bit(evp(w.getNL([1,2,4,5,7,8,10,11,13,14,16,17,19,20,22,23,25,26,28,29,31,32,34])), 35)
-    return w.raw()
-}
-// HID H10320 37-bit: 8-digit BCD card number, leading 1, 4 nonlinear parity bits.
-func hidH10320(_ cn: UInt32) -> UInt64 {
-    var w = Wp(37); w.bit(1, 0)
-    for idx in 0..<8 { var div: UInt64 = 1; var k = 7 - idx; while k > 0 { div *= 10; k -= 1 }; w.set((UInt64(cn) / div) % 10, idx * 4, 4) }
-    w.bit(evp(w.getNL([0,4,8,12,16,20,24,28])), 32)
-    w.bit(odp(w.getNL([1,5,9,13,17,21,25,29])), 33)
-    w.bit(evp(w.getNL([2,6,10,14,18,22,28,30])), 34)
-    w.bit(evp(w.getNL([3,7,11,15,19,23,29,31])), 35)
-    return w.raw()
-}
-// HID Generic 37-bit: CN 32, leading-trailing parity (uses the Pack-side parity bit sets).
-func hidHGen37(_ cn: UInt32) -> UInt64 {
-    var w = Wp(37); w.set(UInt64(cn), 4, 32); w.bit(1, 36)
-    w.bit(evp(w.getNL([4,8,12,16,20,24,28,32])), 0)
-    w.bit(odp(w.getNL([6,10,14,18,22,26,30,34])), 2)
-    w.bit(evp(w.getNL([7,11,15,19,23,27,31,35])), 3)
-    return w.raw()
-}
-// PointGuard MDI 37-bit: FC 4, CN 29, even/odd parity.
-func hidMDI37(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(37); w.set(UInt64(fc), 3, 4); w.set(UInt64(cn), 7, 29); w.bit(evp(w.get(1, 18)), 0); w.bit(odp(w.get(18, 18)), 36); return w.raw() }
 
 // Build the device "value" V (the 44-bit logical payload, right-aligned) for a format + FC/CN.
 // 26-bit: a 0x20 lead marker (bit 37) + sentinel (bit 26) + 26-bit Wiegand.
@@ -582,19 +543,9 @@ func hidValue(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> UInt64 {
     case .w2804:  return hid2804W(fc, cn)
     case .atsw30: return hidATSW30(fc, cn)
     case .adt31:  return hidADT31(fc, cn)
-    case .hcp32:  return hidHCP32(cn)
-    case .hpp32:  return hidHPP32(fc, cn)
-    case .wie32:  return hidWIE32(fc, cn)
     case .kastle: return hidKastle(fc, cn)
-    case .n10002: return hidN10002(fc, cn)
-    case .smp34:  return hidSMP34(fc, cn)
-    case .bqt34:  return hidBQT34(fc, cn)
     case .c15001: return hidC15001(fc, cn)
     case .s12906: return hidS12906(fc, cn)
-    case .sie36:  return hidSie36(fc, cn)
-    case .h10320: return hidH10320(cn)
-    case .hgen37: return hidHGen37(cn)
-    case .mdi37:  return hidMDI37(fc, cn)
     case .h10302, .awid26, .paradox, .fdxbA0, .fdxbA1: return 0  // built by their own block builders, not this path
     }
 }
@@ -654,26 +605,22 @@ func hidDecodeReply(_ p: [UInt8]) -> (raw: UInt64, fmt: HIDFormat?, fc: UInt32, 
         if pb(1) == 1 && pb(0) == ev(gf(1, 16)) && pb(31) == od(gf(14, 17)) {   // Kastle: always-1 + valid parity
             return (raw, .kastle, UInt32(gf(7, 8)), UInt32(gf(15, 16)), 32, "")
         }
-        return (raw, .hpp32, UInt32(gf(1, 12)), UInt32(gf(13, 19)), 32,
-                "  [HCP32 CN=\(gf(1, 24)); WIE32 FC=\(gf(4, 12)) CN=\(gf(16, 16))]")
+        return (raw, nil, 0, 0, 32, "32-bit — not Kastle; unsupported format")
     case 33: return (raw, .d10202, UInt32(gf(1, 7)), UInt32(gf(8, 24)), 33, par(pb(0) == ev(gf(1, 16)) && pb(32) == od(gf(16, 16))))
     case 34:
         let ok = pb(0) == ev(gf(1, 16)) && pb(33) == od(gf(17, 16))
-        return (raw, .h10306, UInt32(gf(1, 16)), UInt32(gf(17, 16)), 34,
-                par(ok) + "  [N10002 same; BQT34 FC=\(gf(1, 8)) CN=\(gf(9, 24)); SMP34 FC=\(gf(1, 13)) CN=\(gf(17, 16))]")
+        return (raw, .h10306, UInt32(gf(1, 16)), UInt32(gf(17, 16)), 34, par(ok))
     case 35: return (raw, .c1k35, UInt32(gf(2, 12)), UInt32(gf(14, 20)), 35, "")   // Corp1000 interleaved parity not re-checked
     case 36:
-        // S12906 and Sie36 can both satisfy S12906's parity, so always note the alternatives.
-        let alt36 = "  [S12906 FC=\(gf(1, 8)) CN=\(gf(11, 24)); Sie36 FC=\(gf(1, 18)) CN=\(gf(19, 16))]"
         if pb(0) == ev(gf(1, 17)) && pb(35) == od(gf(18, 17)) {   // C15001 parity (distinctive)
-            return (raw, .c15001, UInt32(gf(11, 8)), UInt32(gf(19, 16)), 36, "  OEM=\(gf(1, 10))" + alt36)
+            return (raw, .c15001, UInt32(gf(11, 8)), UInt32(gf(19, 16)), 36, "  OEM=\(gf(1, 10))")
         }
-        return (raw, .s12906, UInt32(gf(1, 8)), UInt32(gf(11, 24)), 36, alt36)
+        return (raw, .s12906, UInt32(gf(1, 8)), UInt32(gf(11, 24)), 36, "")
     case 37:
         // Parity failure on a 37-bit read usually means it is not really HID — an AWID/Paradox card
         // demodulates to shifting 40-bit garbage this device can't read. Flag that instead of bogus values.
         let ok37 = pb(0) == ev(gf(1, 18)) && pb(36) == od(gf(18, 18))
-        let note37 = ok37 ? "  [H10302 CN=\(gf(1, 35)); MDI37 FC=\(gf(3, 4)) CN=\(gf(7, 29)); HGen37 CN=\(gf(4, 32))]"
+        let note37 = ok37 ? "  [H10302 CN=\(gf(1, 35))]"
                           : "  (parity fail — likely AWID/Paradox, not readable by this device)"
         return (raw, .h10304, UInt32(gf(1, 16)), UInt32(gf(17, 19)), 37, note37)
     default: return (raw, nil, 0, 0, len, "length \(len) not decoded")

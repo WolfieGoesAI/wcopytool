@@ -367,9 +367,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         // Paradox and FDX-B. nil = separator. The format is carried on each item's representedObject so
         // the separators don't shift any index-based mapping.
         let fmtOrder: [HIDFormat?] = [
-            .h10301, .tecom27, .w2804, .atsw30, .adt31, .hcp32, .hpp32, .wie32, .kastle,
-            .d10202, .h10306, .n10002, .smp34, .bqt34, .c1k35, .c15001, .s12906, .sie36,
-            .h10302, .h10304, .h10320, .hgen37, .mdi37,
+            .h10301, .tecom27, .w2804, .atsw30, .adt31, .kastle,
+            .d10202, .h10306, .c1k35, .c15001, .s12906,
+            .h10302, .h10304,
             nil, .awid26, .paradox, nil, .fdxbA0, .fdxbA1]
         let fmtMenu = NSMenu()
         for f in fmtOrder {
@@ -420,24 +420,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         case .w2804:  return "2804 Wiegand 28-bit"
         case .atsw30: return "ATS Wiegand 30-bit"
         case .adt31:  return "HID ADT 31-bit"
-        case .hcp32:  return "HID Check Point 32-bit (HCP32)"
-        case .hpp32:  return "HID Hewlett-Packard 32-bit (HPP32)"
-        case .wie32:  return "Wiegand 32-bit"
         case .kastle: return "Kastle 32-bit"
         case .d10202: return "HID 33-bit (D10202)"
         case .h10306: return "HID 34-bit (H10306)"
-        case .n10002: return "Honeywell N10002 34-bit"
-        case .smp34:  return "Cardkey Smartpass 34-bit"
-        case .bqt34:  return "BQT 34-bit"
         case .c1k35:  return "HID 35-bit (Corp 1000)"
         case .c15001: return "HID KeyScan C15001 36-bit"
         case .s12906: return "HID Simplex S12906 36-bit"
-        case .sie36:  return "HID Siemens 36-bit"
         case .h10302: return "HID 37-bit (H10302, no FC)"
         case .h10304: return "HID 37-bit (H10304)"
-        case .h10320: return "HID H10320 37-bit (BCD)"
-        case .hgen37: return "HID Generic 37-bit"
-        case .mdi37:  return "PointGuard MDI 37-bit"
         case .awid26: return "AWID 26-bit"
         case .paradox: return "Paradox"
         case .fdxbA0: return "FDX-B (Animal flag 0)"
