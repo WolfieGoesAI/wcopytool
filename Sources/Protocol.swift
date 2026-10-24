@@ -311,7 +311,12 @@ let kT5HIDConfigWire: [UInt8] = [0x00,0x10,0x70,0x60]
 
 // LF prox formats this app can write. HID 26/37 are capture-verified; AWID 26 is spec-based
 // (Proxmark getAWIDBits) and WRITE-ONLY (this reader can't read AWID back) — verify on another reader.
-enum HIDFormat: Int { case h10301 = 0, d10202 = 1, h10306 = 2, c1k35 = 3, h10302 = 4, h10304 = 5, awid26 = 6, paradox = 7, fdxbA0 = 8, fdxbA1 = 9 }
+enum HIDFormat: Int {
+    case h10301 = 0, tecom27, w2804, atsw30, adt31, hcp32, hpp32, wie32, kastle,
+         d10202, h10306, n10002, smp34, bqt34, c1k35, c15001, s12906, sie36,
+         h10302, h10304, h10320, hgen37, mdi37,
+         awid26, paradox, fdxbA0, fdxbA1
+}
 
 // Base T5577 config (block 0) per format. The PWD bit (0x10) is OR'd in by the caller when protecting.
 func lfProxConfig(_ fmt: HIDFormat) -> UInt32 {
@@ -470,9 +475,14 @@ private func odp(_ x: UInt64) -> UInt64 { UInt64((x.nonzeroBitCount + 1) % 2) } 
 private struct Wp {
     let len: Int; var p: UInt64 = 0
     init(_ l: Int) { len = l }
-    mutating func set(_ v: UInt64, _ firstBit: Int, _ width: Int) { p |= (v & ((UInt64(1) << width) - 1)) << (len - firstBit - width) }
-    func get(_ firstBit: Int, _ width: Int) -> UInt64 { (p >> (len - firstBit - width)) & ((UInt64(1) << width) - 1) }
-    mutating func bit(_ b: UInt64, _ pos: Int) { p |= (b & 1) << (len - 1 - pos) }
+    // Bit-by-bit, mirroring Proxmark's set/get_bit_by_position: positions outside [0,len) are ignored
+    // (several formats over-specify a field width), and linear/nonlinear fields are placed MSB-first.
+    mutating func bit(_ b: UInt64, _ pos: Int) { if pos >= 0 && pos < len { p |= (b & 1) << (len - 1 - pos) } }
+    func bitAt(_ pos: Int) -> UInt64 { (pos >= 0 && pos < len) ? (p >> (len - 1 - pos)) & 1 : 0 }
+    mutating func set(_ v: UInt64, _ firstBit: Int, _ width: Int) { for i in 0..<width { bit((v >> UInt64(width - 1 - i)) & 1, firstBit + i) } }
+    func get(_ firstBit: Int, _ width: Int) -> UInt64 { var r: UInt64 = 0; for i in 0..<width { r = (r << 1) | bitAt(firstBit + i) }; return r }
+    mutating func setNL(_ v: UInt64, _ bits: [Int]) { for (i, pos) in bits.enumerated() { bit((v >> UInt64(bits.count - 1 - i)) & 1, pos) } }
+    func getNL(_ bits: [Int]) -> UInt64 { var r: UInt64 = 0; for pos in bits { r = (r << 1) | bitAt(pos) }; return r }
     func raw() -> UInt64 { len == 37 ? p : (UInt64(1) << 37) | (UInt64(1) << len) | p }
 }
 // D10202 33-bit: FC 7, CN 24.
@@ -493,6 +503,69 @@ func hidC1k35(_ fc: UInt32, _ cn: UInt32) -> UInt64 {
     let p = (mid << 32) | (bot & 0xFFFFFFFF)
     return (UInt64(1) << 37) | (UInt64(1) << 35) | p
 }
+// ---- set A: remaining HID/FSK Wiegand formats, 27..37 bit (ported from Proxmark wiegand_formats.c) ----
+// Tecom 27-bit: nonlinear FC/CN, no parity.
+func hidTecom27(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(27); w.setNL(UInt64(fc), [15,19,24,23,22,18,6,10,14,3,2]); w.setNL(UInt64(cn), [0,1,13,12,9,26,20,16,17,21,25,7,8,11,4,5]); return w.raw() }
+// 2804 Wiegand 28-bit: FC 8, CN 15, three parity bits.
+func hid2804W(_ fc: UInt32, _ cn: UInt32) -> UInt64 {
+    var w = Wp(28); w.set(UInt64(fc), 4, 8); w.set(UInt64(cn), 12, 15)
+    w.bit(odp(w.getNL([4,5,7,8,10,11,13,14,16,17,19,20,22,23,25,26])), 2)
+    w.bit(evp(w.get(1, 13)), 0)
+    w.bit(odp(w.get(0, 27)), 27)
+    return w.raw()
+}
+// ATS Wiegand 30-bit: FC 12, CN 16, even/odd parity.
+func hidATSW30(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(30); w.set(UInt64(fc), 1, 12); w.set(UInt64(cn), 13, 16); w.bit(evp(w.get(1, 12)), 0); w.bit(odp(w.get(13, 16)), 29); return w.raw() }
+// HID ADT 31-bit: FC 4, CN 23, no parity.
+func hidADT31(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(31); w.set(UInt64(fc), 1, 4); w.set(UInt64(cn), 5, 23); return w.raw() }
+// HID Check Point 32-bit: CN 24 only, no parity.
+func hidHCP32(_ cn: UInt32) -> UInt64 { var w = Wp(32); w.set(UInt64(cn), 1, 24); return w.raw() }
+// HID Hewlett-Packard 32-bit: FC 12, CN (width 29 nominal, clipped to 19 within the frame), no parity.
+func hidHPP32(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(32); w.set(UInt64(fc), 1, 12); w.set(UInt64(cn), 13, 29); return w.raw() }
+// Wiegand 32-bit: FC 12, CN 16, no parity.
+func hidWIE32(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(32); w.set(UInt64(fc), 4, 12); w.set(UInt64(cn), 16, 16); return w.raw() }
+// Kastle 32-bit: always-1 bit, issue level (0), FC 8, CN 16, parity.
+func hidKastle(_ fc: UInt32, _ cn: UInt32) -> UInt64 {
+    var w = Wp(32); w.bit(1, 1); w.set(0, 2, 5); w.set(UInt64(fc), 7, 8); w.set(UInt64(cn), 15, 16)
+    w.bit(evp(w.get(1, 16)), 0); w.bit(odp(w.get(14, 17)), 31); return w.raw()
+}
+// Honeywell/Northern N10002 34-bit: FC 16, CN 16, parity.
+func hidN10002(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(34); w.set(UInt64(fc), 1, 16); w.set(UInt64(cn), 17, 16); w.bit(evp(w.get(1, 16)), 0); w.bit(odp(w.get(17, 16)), 33); return w.raw() }
+// Cardkey Smartpass 34-bit: FC 13, issue level (0), CN 16, no parity.
+func hidSMP34(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(34); w.set(UInt64(fc), 1, 13); w.set(0, 14, 3); w.set(UInt64(cn), 17, 16); return w.raw() }
+// BQT 34-bit: FC 8, CN 24, parity.
+func hidBQT34(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(34); w.set(UInt64(fc), 1, 8); w.set(UInt64(cn), 9, 24); w.bit(evp(w.get(1, 16)), 0); w.bit(odp(w.get(17, 16)), 33); return w.raw() }
+// HID KeyScan C15001 36-bit: OEM (900), FC 8, CN 16, parity.
+func hidC15001(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(36); w.set(900, 1, 10); w.set(UInt64(fc), 11, 8); w.set(UInt64(cn), 19, 16); w.bit(evp(w.get(1, 17)), 0); w.bit(odp(w.get(18, 17)), 35); return w.raw() }
+// HID Simplex S12906 36-bit: FC 8, issue level (0), CN 24, parity.
+func hidS12906(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(36); w.set(UInt64(fc), 1, 8); w.set(0, 9, 2); w.set(UInt64(cn), 11, 24); w.bit(odp(w.get(1, 17)), 0); w.bit(odp(w.get(17, 18)), 35); return w.raw() }
+// HID Siemens 36-bit: FC 18, CN 16, nonlinear parity.
+func hidSie36(_ fc: UInt32, _ cn: UInt32) -> UInt64 {
+    var w = Wp(36); w.set(UInt64(fc), 1, 18); w.set(UInt64(cn), 19, 16)
+    w.bit(odp(w.getNL([1,3,4,6,7,9,10,12,13,15,16,18,19,21,22,24,25,27,28,30,31,33,34])), 0)
+    w.bit(evp(w.getNL([1,2,4,5,7,8,10,11,13,14,16,17,19,20,22,23,25,26,28,29,31,32,34])), 35)
+    return w.raw()
+}
+// HID H10320 37-bit: 8-digit BCD card number, leading 1, 4 nonlinear parity bits.
+func hidH10320(_ cn: UInt32) -> UInt64 {
+    var w = Wp(37); w.bit(1, 0)
+    for idx in 0..<8 { var div: UInt64 = 1; var k = 7 - idx; while k > 0 { div *= 10; k -= 1 }; w.set((UInt64(cn) / div) % 10, idx * 4, 4) }
+    w.bit(evp(w.getNL([0,4,8,12,16,20,24,28])), 32)
+    w.bit(odp(w.getNL([1,5,9,13,17,21,25,29])), 33)
+    w.bit(evp(w.getNL([2,6,10,14,18,22,28,30])), 34)
+    w.bit(evp(w.getNL([3,7,11,15,19,23,29,31])), 35)
+    return w.raw()
+}
+// HID Generic 37-bit: CN 32, leading-trailing parity (uses the Pack-side parity bit sets).
+func hidHGen37(_ cn: UInt32) -> UInt64 {
+    var w = Wp(37); w.set(UInt64(cn), 4, 32); w.bit(1, 36)
+    w.bit(evp(w.getNL([4,8,12,16,20,24,28,32])), 0)
+    w.bit(odp(w.getNL([6,10,14,18,22,26,30,34])), 2)
+    w.bit(evp(w.getNL([7,11,15,19,23,27,31,35])), 3)
+    return w.raw()
+}
+// PointGuard MDI 37-bit: FC 4, CN 29, even/odd parity.
+func hidMDI37(_ fc: UInt32, _ cn: UInt32) -> UInt64 { var w = Wp(37); w.set(UInt64(fc), 3, 4); w.set(UInt64(cn), 7, 29); w.bit(evp(w.get(1, 18)), 0); w.bit(odp(w.get(18, 18)), 36); return w.raw() }
 
 // Build the device "value" V (the 44-bit logical payload, right-aligned) for a format + FC/CN.
 // 26-bit: a 0x20 lead marker (bit 37) + sentinel (bit 26) + 26-bit Wiegand.
@@ -505,6 +578,23 @@ func hidValue(_ fmt: HIDFormat, _ fc: UInt32, _ cn: UInt32) -> UInt64 {
     case .d10202: return hidD10202(fc, cn)
     case .h10306: return hidH10306(fc, cn)
     case .c1k35:  return hidC1k35(fc, cn)
+    case .tecom27: return hidTecom27(fc, cn)
+    case .w2804:  return hid2804W(fc, cn)
+    case .atsw30: return hidATSW30(fc, cn)
+    case .adt31:  return hidADT31(fc, cn)
+    case .hcp32:  return hidHCP32(cn)
+    case .hpp32:  return hidHPP32(fc, cn)
+    case .wie32:  return hidWIE32(fc, cn)
+    case .kastle: return hidKastle(fc, cn)
+    case .n10002: return hidN10002(fc, cn)
+    case .smp34:  return hidSMP34(fc, cn)
+    case .bqt34:  return hidBQT34(fc, cn)
+    case .c15001: return hidC15001(fc, cn)
+    case .s12906: return hidS12906(fc, cn)
+    case .sie36:  return hidSie36(fc, cn)
+    case .h10320: return hidH10320(cn)
+    case .hgen37: return hidHGen37(cn)
+    case .mdi37:  return hidMDI37(fc, cn)
     case .h10302, .awid26, .paradox, .fdxbA0, .fdxbA1: return 0  // built by their own block builders, not this path
     }
 }
