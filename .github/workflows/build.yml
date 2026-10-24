@@ -22,7 +22,13 @@ jobs:
       - name: Build universal (arm64 + x86_64)
         run: |
           mkdir -p dist
-          ./build.sh
+          set +e
+          ./build.sh 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" != "0" ]; then
+            { echo '### Build failed'; echo '```'; grep -E "error:|warning:" build.log | head -60; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
           ( cd build && zip -r ../dist/wCopyTool-universal.zip wCopyTool.app )
           shasum -a 256 dist/wCopyTool-universal.zip
 
