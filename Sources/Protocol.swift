@@ -663,13 +663,12 @@ func hidDecodeReply(_ p: [UInt8]) -> (raw: UInt64, fmt: HIDFormat?, fc: UInt32, 
                 par(ok) + "  [N10002 same; BQT34 FC=\(gf(1, 8)) CN=\(gf(9, 24)); SMP34 FC=\(gf(1, 13)) CN=\(gf(17, 16))]")
     case 35: return (raw, .c1k35, UInt32(gf(2, 12)), UInt32(gf(14, 20)), 35, "")   // Corp1000 interleaved parity not re-checked
     case 36:
-        if pb(0) == ev(gf(1, 17)) && pb(35) == od(gf(18, 17)) {   // C15001 parity
-            return (raw, .c15001, UInt32(gf(11, 8)), UInt32(gf(19, 16)), 36, "  OEM=\(gf(1, 10))")
+        // S12906 and Sie36 can both satisfy S12906's parity, so always note the alternatives.
+        let alt36 = "  [S12906 FC=\(gf(1, 8)) CN=\(gf(11, 24)); Sie36 FC=\(gf(1, 18)) CN=\(gf(19, 16))]"
+        if pb(0) == ev(gf(1, 17)) && pb(35) == od(gf(18, 17)) {   // C15001 parity (distinctive)
+            return (raw, .c15001, UInt32(gf(11, 8)), UInt32(gf(19, 16)), 36, "  OEM=\(gf(1, 10))" + alt36)
         }
-        if pb(0) == od(gf(1, 17)) && pb(35) == od(gf(17, 18)) {   // S12906 parity
-            return (raw, .s12906, UInt32(gf(1, 8)), UInt32(gf(11, 24)), 36, "")
-        }
-        return (raw, .sie36, UInt32(gf(1, 18)), UInt32(gf(19, 16)), 36, "")   // Sie36 (nonlinear parity not re-checked)
+        return (raw, .s12906, UInt32(gf(1, 8)), UInt32(gf(11, 24)), 36, alt36)
     case 37:
         // Parity failure on a 37-bit read usually means it is not really HID — an AWID/Paradox card
         // demodulates to shifting 40-bit garbage this device can't read. Flag that instead of bogus values.
