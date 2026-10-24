@@ -366,8 +366,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func pageHID() -> NSView {
         hidFC.target = self; hidFC.action = #selector(hidEdited)
         hidCN.target = self; hidCN.action = #selector(hidEdited)
-        hidFmtPop.addItems(withTitles: ["HID 26-bit (H10301)", "HID 33-bit (D10202)", "HID 34-bit (H10306)", "HID 35-bit (Corp 1000)", "HID 37-bit (H10302, no FC)", "HID 37-bit (H10304)", "AWID 26-bit", "Paradox", "FDX-B"])
-        hidFmtPop.selectItem(at: 0)
+        // Build the format menu with separator lines between the HID group and AWID, and between
+        // Paradox and FDX-B. nil = separator. The format is carried on each item's representedObject so
+        // the separators don't shift any index-based mapping.
+        let fmtOrder: [HIDFormat?] = [.h10301, .d10202, .h10306, .c1k35, .h10302, .h10304, nil, .awid26, .paradox, nil, .fdxb]
+        let fmtMenu = NSMenu()
+        for f in fmtOrder {
+            if let f = f {
+                let it = NSMenuItem(title: hidFmtName(f), action: nil, keyEquivalent: "")
+                it.representedObject = f.rawValue
+                fmtMenu.addItem(it)
+            } else {
+                fmtMenu.addItem(.separator())
+            }
+        }
+        hidFmtPop.menu = fmtMenu
+        selectHidFormat(.h10301)
         hidFmtPop.target = self; hidFmtPop.action = #selector(hidEdited)
         let row = hstack([labeled("Format:", hidFmtPop),
                           labeled("Facility code:", field(hidFC, 80)),
@@ -385,7 +399,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         return vstack([row, protRow, revRow, hidInfo])
     }
     @objc func hidEdited() { hidRefresh() }
-    func hidFormat() -> HIDFormat { HIDFormat(rawValue: hidFmtPop.indexOfSelectedItem) ?? .h10301 }
+    func hidFormat() -> HIDFormat {
+        if let raw = hidFmtPop.selectedItem?.representedObject as? Int, let f = HIDFormat(rawValue: raw) { return f }
+        return .h10301
+    }
+    func selectHidFormat(_ f: HIDFormat) {
+        for it in hidFmtPop.menu?.items ?? [] where (it.representedObject as? Int) == f.rawValue { hidFmtPop.select(it); return }
+    }
     // Data blocks for the current format: FDX-B uses country (FC field) + 38-bit national (CN field);
     // all others use FC/CN. Returns 3 blocks (HID/AWID/Paradox) or 4 (FDX-B).
     func lfBlocksFor(_ fmt: HIDFormat) -> [UInt32] {
@@ -473,7 +493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         if let r = hidDecodeReply(p) {
             if let fmt = r.fmt {
                 hidReadActive = false
-                hidFmtPop.selectItem(at: fmt.rawValue)
+                selectHidFormat(fmt)
                 hidFC.stringValue = String(r.fc); hidCN.stringValue = String(r.cn); hidRefresh()
                 log(String(format: "✓ HID read: %@  FC=%u CN=%u  (raw %llX, %d-bit)%@", hidFmtName(fmt), r.fc, r.cn, r.raw, r.len, r.note))
             } else {
