@@ -110,10 +110,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let content = NSView(frame: rect); window.contentView = content
 
         statusField.textColor = .systemRed
-        let rescan = ActionButton("Rescan") { [weak self] in self?.rescan() }
-        let topBar = hstack([statusField, NSView(), rescan])
-        topBar.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(topBar)
+        statusField.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(statusField)   // anchored at the BOTTOM, below the log (constraints below)
 
         // tabs
         let tabs = NSTabView()
@@ -156,11 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
         let g = content
         NSLayoutConstraint.activate([
-            topBar.topAnchor.constraint(equalTo: g.topAnchor, constant: 10),
-            topBar.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 12),
-            topBar.trailingAnchor.constraint(equalTo: g.trailingAnchor, constant: -12),
-
-            tabs.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 8),
+            tabs.topAnchor.constraint(equalTo: g.topAnchor, constant: 10),
             tabs.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 12),
             tabs.trailingAnchor.constraint(equalTo: g.trailingAnchor, constant: -12),
             tabs.heightAnchor.constraint(equalToConstant: 310),
@@ -177,8 +171,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             logScroll.topAnchor.constraint(equalTo: respScroll.bottomAnchor, constant: 8),
             logScroll.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 12),
             logScroll.trailingAnchor.constraint(equalTo: g.trailingAnchor, constant: -12),
-            logScroll.bottomAnchor.constraint(equalTo: g.bottomAnchor, constant: -12),
+            logScroll.bottomAnchor.constraint(equalTo: statusField.topAnchor, constant: -8),
             logScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 90),
+
+            // green status line at the very bottom, below the log window
+            statusField.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 12),
+            statusField.trailingAnchor.constraint(equalTo: g.trailingAnchor, constant: -12),
+            statusField.bottomAnchor.constraint(equalTo: g.bottomAnchor, constant: -10),
         ])
         window.makeKeyAndOrderFront(nil)
     }
@@ -1056,7 +1055,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         ])
         let warn = NSTextField(wrappingLabelWithString: "⚠︎ The Windows app also has hidden firmware Init / Erase / flash buttons (X7V310…-74H). Their opcodes are NOT mapped and are deliberately omitted — a wrong firmware frame can brick the reader. Use the Raw page only if you know the exact bytes.")
         warn.font = NSFont.systemFont(ofSize: 10); warn.textColor = .systemOrange; warn.preferredMaxLayoutWidth = 900
-        return vstack([head("Advanced / hidden control opcodes"), g0, g1, g2, warn])
+        let gRescan = hstack([ActionButton("Rescan") { [weak self] in self?.rescan() }, NSView()])
+        return vstack([head("Advanced / hidden control opcodes"), gRescan, g0, g1, g2, warn])
     }
 
     // Editable known-password list (feeds Unlock and Write), shown with bit-reversed + byte-reversed
