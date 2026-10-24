@@ -243,15 +243,18 @@ object Proto {
         for ((i, b) in bits.withIndex()) out[i / 32] = ((out[i / 32] shl 1) or b.toLong()) and 0xFFFFFFFFL
         return out
     }
-    // AWID 26/34-bit (FSK2a RF/50), per Proxmark getAWIDBits. The group-parity bit is the XOR of the
-    // group (Proxmark addParity, pType=1), not its complement. WRITE-ONLY on this device.
+    // AWID 26/34-bit (FSK2a RF/50), per Proxmark getAWIDBits. The group parity bit is 1 when the group
+    // sum is EVEN — the polarity that reads back on real hardware (verified; plain XOR does not register).
+    // WRITE-ONLY on this device.
     fun awidBlocks(fmtlen: Int, fc: Long, cn: Long): LongArray {
         val data = ArrayList<Int>()
         bitsMSB(fc, 8).forEach { data.add(it) }
         bitsMSB(cn, if (fmtlen == 34) 24 else 16).forEach { data.add(it) }
         val pre = ArrayList<Int>(); bitsMSB(fmtlen.toLong(), 8).forEach { pre.add(it) }; pre.addAll(wiegandAddParity(data))
         while (pre.size < 66) pre.add(0)
-        val bits = ArrayList<Int>(); bits.addAll(listOf(0, 0, 0, 0, 0, 0, 0, 1)); bits.addAll(addParityOdd(pre, 66, 4))
+        val body = ArrayList<Int>(); var i = 0
+        while (i < 66) { val g = pre.subList(i, minOf(i + 3, 66)); body.addAll(g); body.add(if (g.sum() % 2 == 0) 1 else 0); i += 3 }
+        val bits = ArrayList<Int>(); bits.addAll(listOf(0, 0, 0, 0, 0, 0, 0, 1)); bits.addAll(body)
         return packBlocks(bits, 3)
     }
     // ioProx (FSK2a RF/64) — 64-bit, per Proxmark getIOProxBits. version defaults to 1.

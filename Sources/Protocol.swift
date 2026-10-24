@@ -446,8 +446,10 @@ func addParityOdd(_ src: [Int], _ sourceLen: Int, _ pLen: Int) -> [Int] {
 func dec2bcd(_ dec: UInt32) -> UInt32 { var d = dec, r: UInt32 = 0, s: UInt32 = 0; while d > 0 { r |= (d % 10) << s; d /= 10; s += 4 }; return r }
 
 // AWID 26/34/37-bit (FSK2a, RF/50) → three T5577 data blocks. 96-bit stream per Proxmark getAWIDBits:
-// 8-bit preamble 00000001, then addParity (groups of 3 + XOR parity) over a 66-bit buffer:
-//   [fmtlen : 8][Wiegand (EP | FC | CN | OP)][zero pad]. WRITE-ONLY (this device can't read AWID back).
+// 8-bit preamble 00000001, then groups of 3 source bits + a parity bit, over a 66-bit buffer:
+//   [fmtlen : 8][Wiegand (EP | FC | CN | OP)][zero pad]. The group parity bit is 1 when the group sum
+//   is EVEN — this is the polarity that reads back correctly on real hardware (hardware-verified; a
+//   plain XOR polarity does NOT register). WRITE-ONLY (this device can't read AWID back).
 func awidBlocks(_ fmtlen: Int, _ fc: UInt32, _ cn: UInt32) -> [UInt32] {
     let data: [Int]
     switch fmtlen {
@@ -456,7 +458,8 @@ func awidBlocks(_ fmtlen: Int, _ fc: UInt32, _ cn: UInt32) -> [UInt32] {
     }
     var pre = bitsMSB(UInt64(fmtlen), 8) + wiegandAddParity(data)
     while pre.count < 66 { pre.append(0) }
-    let body = addParityOdd(pre, 66, 4)                    // 88 bits
+    var body: [Int] = []; var i = 0
+    while i < 66 { let g = Array(pre[i..<min(i + 3, 66)]); body += g; body.append(g.reduce(0, +) % 2 == 0 ? 1 : 0); i += 3 }
     return packBlocks([0,0,0,0,0,0,0,1] + body, 3)
 }
 // ioProx (FSK2a RF/64) → two data blocks (64-bit), per Proxmark getIOProxBits. version defaults to 1.

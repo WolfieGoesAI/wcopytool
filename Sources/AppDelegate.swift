@@ -574,13 +574,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             seq.append((lfT5WriteNoPwd(addr: blk, word: d, freq: freq), "\(name) op12"))
             for pw in dcands { seq.append((lfT5Write(addr: blk, word: d, pwd: pw, freq: freq), "\(name) op13 (auth \(hexJoin(pw)))")) }
         }
-        // The 0x64 "HID finalize" re-processes the card as HID. That's correct for genuine HID Prox
-        // (and harmless for the Manchester/EM configs), but it corrupts a non-HID FSK payload that
-        // shares the HID config word (AWID/Pyramid/Paradox/ioProx/Destron), so skip it for those.
-        let noFinalize: Set<HIDFormat> = [.awid26, .awid34, .paradox, .pyramid, .ioprox, .destron]
-        if !noFinalize.contains(fmt) {
-            seq.append((lfModeCmd(0x64, freq: freq), "HID finalize"))   // the op00/0x64 the original sends
-        }
+        seq.append((lfModeCmd(0x64, freq: freq), "HID finalize"))   // the op00/0x64 the original sends
         sendSeq(seq, gap: 0.28)
         // Remember the password now on the card so the next write/unprotect can authenticate.
         hidUnlock.stringValue = protect ? (hexJoin(setPwd)) : "00000000"
