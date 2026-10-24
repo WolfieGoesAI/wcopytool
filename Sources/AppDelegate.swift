@@ -1154,11 +1154,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         log("» \(label) (verbatim)")
     }
 
+    // Device identity shown in the green header: queried from the reader itself (FF 00 68 = model +
+    // firmware, FF 00 69 = serial) rather than taken from the USB descriptor. idFallback keeps the
+    // descriptor label in case the firmware doesn't answer.
+    var idBase = "", idFallback = ""
+    var idInfo: String? = nil, idSerial: String? = nil
+    var awaitingIdentity = false
+
     func wireHID() {
         hid.onLog = { [weak self] s in DispatchQueue.main.async { self?.log(s) } }
-        hid.onConnect = { [weak self] label in self?.statusField.stringValue = "Connected: \(label)"; self?.statusField.textColor = .systemGreen }
+        hid.onConnect = { [weak self] label in
+            guard let self = self else { return }
+            // Descriptor segment = VID:PID (hex) + USB product string, dropping the "SN:" part (the
+            // serial now comes from the device's own FF0069 response). label = "VID:PID  PRODUCT  SN:x".
+            let c = label.components(separatedBy: "  ")
+            self.idBase = c.count >= 2 ? "\(c[0]) \(c[1])" : (c.first ?? label)
+            self.idFallback = label
+            self.statusField.stringValue = "\(self.idBase) …"
+            self.statusField.textColor = .systemGreen
+            self.startIdentityQuery()
+        }
         hid.onDisconnect = { [weak self] in self?.statusField.stringValue = "Not connected"; self?.statusField.textColor = .systemRed }
         hid.onReport = { [weak self] bytes in self?.gotReport(bytes) }
+    }
+
+    // Ask the reader for its model/firmware and serial, then build the green header from the answers.
+    func startIdentityQuery() {
+        idInfo = nil; idSerial = nil; awaitingIdentity = true
+        afterDelay(0.15) { [weak self] in self?.sendPayload([0xFF, 0x00, 0x68], "device info") }   // → model + firmware
+        afterDelay(1.5) { [weak self] in                                                           // fallback if no answer
+            guard let self = self, self.awaitingIdentity else { return }
+            self.awaitingIdentity = false
+            if self.idInfo == nil && self.idSerial == nil { self.statusField.stringValue = self.idBase }   // descriptor only
+            else { self.updateIdentityLabel() }
+        }
+    }
+    // Returns true when it consumed an identity (ASCII) reply; false for a plain status reply so routing continues.
+    func handleIdentity(_ bytes: [UInt8]) -> Bool {
+        guard let (payload, _, _, _) = Frame.parse(bytes) else { return false }
+        let printable = payload.count >= 4 && payload.allSatisfy { (0x20...0x7e).contains($0) }
+        guard printable else { return false }           // e.g. a 02 07 status frame — ignore, keep waiting
+        let s = asciiOf(payload).trimmingCharacters(in: .whitespaces)
+        if idInfo == nil { idInfo = s; sendPayload([0xFF, 0x00, 0x69], "serial number") }   // → serial
+        else { idSerial = s; awaitingIdentity = false }
+        updateIdentityLabel()
+        return true
+    }
+    func updateIdentityLabel() {
+        // Three segments: USB descriptor (VID:PID + product), device-info response, serial response.
+        var parts = [idBase]
+        if let i = idInfo, !i.isEmpty { parts.append(i) }
+        parts.append((idSerial?.isEmpty == false) ? idSerial! : "-")
+        statusField.stringValue = parts.joined(separator: " - ")
+        statusField.textColor = .systemGreen
     }
     @objc func rescan() { hid.stop(); if !hid.start() { log("restart failed") } }
 
@@ -1171,6 +1219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         fUID.stringValue = p.uid.isEmpty ? "—" : p.uid
         fPayload.stringValue = p.payloadHex.isEmpty ? "—" : p.payloadHex
         fAscii.stringValue = p.ascii.isEmpty ? "—" : p.ascii
+        if awaitingIdentity, handleIdentity(bytes) { return }   // device info / serial reply at connect
         if recPhase != .idle { handleRecovery(bytes) }
         else if hidUlActive { handleHIDUnlock(bytes) }
         else if hidReadActive { handleHIDRead(bytes) }
