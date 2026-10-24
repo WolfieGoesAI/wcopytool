@@ -638,19 +638,44 @@ func hidDecodeReply(_ p: [UInt8]) -> (raw: UInt64, fmt: HIDFormat?, fc: UInt32, 
     let packed = raw & ((UInt64(1) << len) - 1)
     func gf(_ fb: Int, _ w: Int) -> UInt64 { (packed >> (len - fb - w)) & ((UInt64(1) << w) - 1) }
     func pb(_ pos: Int) -> UInt64 { (packed >> (len - 1 - pos)) & 1 }
+    func gnl(_ bits: [Int]) -> UInt64 { var r: UInt64 = 0; for p in bits { r = (r << 1) | ((p >= 0 && p < len) ? (packed >> (len - 1 - p)) & 1 : 0) }; return r }
     func ev(_ x: UInt64) -> UInt64 { UInt64(x.nonzeroBitCount % 2) }
     func od(_ x: UInt64) -> UInt64 { UInt64((x.nonzeroBitCount + 1) % 2) }
     func par(_ ok: Bool) -> String { ok ? "" : "  (parity?)" }
     switch len {
     case 26: return (raw, .h10301, UInt32(gf(1, 8)), UInt32(gf(9, 16)), 26, par(pb(0) == ev(gf(1, 12)) && pb(25) == od(gf(13, 12))))
+    case 27: return (raw, .tecom27, UInt32(gnl([15,19,24,23,22,18,6,10,14,3,2])), UInt32(gnl([0,1,13,12,9,26,20,16,17,21,25,7,8,11,4,5])), 27, "")
+    case 28:
+        let ok = pb(0) == ev(gf(1, 13)) && pb(2) == od(gnl([4,5,7,8,10,11,13,14,16,17,19,20,22,23,25,26])) && pb(27) == od(gf(0, 27))
+        return (raw, .w2804, UInt32(gf(4, 8)), UInt32(gf(12, 15)), 28, par(ok))
+    case 30: return (raw, .atsw30, UInt32(gf(1, 12)), UInt32(gf(13, 16)), 30, par(pb(0) == ev(gf(1, 12)) && pb(29) == od(gf(13, 16))))
+    case 31: return (raw, .adt31, UInt32(gf(1, 4)), UInt32(gf(5, 23)), 31, "")
+    case 32:
+        if pb(1) == 1 && pb(0) == ev(gf(1, 16)) && pb(31) == od(gf(14, 17)) {   // Kastle: always-1 + valid parity
+            return (raw, .kastle, UInt32(gf(7, 8)), UInt32(gf(15, 16)), 32, "")
+        }
+        return (raw, .hpp32, UInt32(gf(1, 12)), UInt32(gf(13, 19)), 32,
+                "  [HCP32 CN=\(gf(1, 24)); WIE32 FC=\(gf(4, 12)) CN=\(gf(16, 16))]")
     case 33: return (raw, .d10202, UInt32(gf(1, 7)), UInt32(gf(8, 24)), 33, par(pb(0) == ev(gf(1, 16)) && pb(32) == od(gf(16, 16))))
-    case 34: return (raw, .h10306, UInt32(gf(1, 16)), UInt32(gf(17, 16)), 34, par(pb(0) == ev(gf(1, 16)) && pb(33) == od(gf(17, 16))))
+    case 34:
+        let ok = pb(0) == ev(gf(1, 16)) && pb(33) == od(gf(17, 16))
+        return (raw, .h10306, UInt32(gf(1, 16)), UInt32(gf(17, 16)), 34,
+                par(ok) + "  [N10002 same; BQT34 FC=\(gf(1, 8)) CN=\(gf(9, 24)); SMP34 FC=\(gf(1, 13)) CN=\(gf(17, 16))]")
     case 35: return (raw, .c1k35, UInt32(gf(2, 12)), UInt32(gf(14, 20)), 35, "")   // Corp1000 interleaved parity not re-checked
+    case 36:
+        if pb(0) == ev(gf(1, 17)) && pb(35) == od(gf(18, 17)) {   // C15001 parity
+            return (raw, .c15001, UInt32(gf(11, 8)), UInt32(gf(19, 16)), 36, "  OEM=\(gf(1, 10))")
+        }
+        if pb(0) == od(gf(1, 17)) && pb(35) == od(gf(17, 18)) {   // S12906 parity
+            return (raw, .s12906, UInt32(gf(1, 8)), UInt32(gf(11, 24)), 36, "")
+        }
+        return (raw, .sie36, UInt32(gf(1, 18)), UInt32(gf(19, 16)), 36, "")   // Sie36 (nonlinear parity not re-checked)
     case 37:
         // Parity failure on a 37-bit read usually means it is not really HID — an AWID/Paradox card
         // demodulates to shifting 40-bit garbage this device can't read. Flag that instead of bogus values.
         let ok37 = pb(0) == ev(gf(1, 18)) && pb(36) == od(gf(18, 18))
-        let note37 = ok37 ? "  [or H10302 CN=\(gf(1, 35))]" : "  (parity fail — likely AWID/Paradox, not readable by this device)"
+        let note37 = ok37 ? "  [H10302 CN=\(gf(1, 35)); MDI37 FC=\(gf(3, 4)) CN=\(gf(7, 29)); HGen37 CN=\(gf(4, 32))]"
+                          : "  (parity fail — likely AWID/Paradox, not readable by this device)"
         return (raw, .h10304, UInt32(gf(1, 16)), UInt32(gf(17, 19)), 37, note37)
     default: return (raw, nil, 0, 0, len, "length \(len) not decoded")
     }
